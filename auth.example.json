@@ -1,0 +1,21 @@
+{
+  "opencode-go": {
+    "type": "api_key",
+    "key": "YOUR_OPENCODE_GO_API_KEY"
+  },
+  "openai": {
+    "type": "api_key",
+    "key": "YOUR_OPENAI_API_KEY"
+  },
+  "anthropic": {
+    "type": "api_key",
+    "key": "YOUR_ANTHROPIC_API_KEY"
+  },
+  "openai-codex": {
+    "type": "oauth",
+    "access": "",
+    "refresh": "",
+    "expires": 0,
+    "accountId": ""
+  }
+}

@@ -1,0 +1,49 @@
+# cagent clang-tidy configuration.
+# Focus: memory safety, resource lifetime, ownership correctness.
+# We intentionally do NOT enable style/readability noise; keep the bar pragmatic.
+
+Checks: >
+  -*,
+  # Precise analyzer groups. The whole security.* group is excluded:
+  # its DeprecatedOrUnsafeBufferHandling check cannot be disabled by its
+  # exact name and is pure noise on glibc (no Annex K functions).
+  clang-analyzer-core.*,
+  clang-analyzer-deadcode.*,
+  clang-analyzer-nullability.*,
+  clang-analyzer-unix.*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-branch-clone,
+  -bugprone-suspicious-include,
+  -bugprone-casting-void-pointer-to-non-void,
+  -bugprone-misplaced-widening-cast,
+  -bugprone-integer-division,
+  -bugprone-too-small-loop-variable,
+  cert-*,
+  -cert-err33-c,
+  -cert-env33-c,
+  -cert-err34-c,
+  -cert-msc30-c,
+  -cert-msc50-cpp,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp,
+  misc-*,
+  -misc-include-cleaner,
+  -misc-non-private-member-variables-in-classes,
+  -misc-const-correctness,
+  -misc-static-assert,
+  -misc-unused-parameters,
+  performance-*,
+  -performance-unnecessary-value-param,
+  portability-*
+
+WarningsAsErrors: ''
+HeaderFilterRegex: 'src/.*'
+
+CheckOptions:
+  - key: bugprone-use-after-move
+    value: 'true'
+  - key: cert-dcl21-cpp
+    value: 'false'

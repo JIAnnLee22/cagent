@@ -1,0 +1,41 @@
+# cagent code style: LLVM base, adjusted for C
+BasedOnStyle: LLVM
+Language: C
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+
+ColumnLimit: 100
+
+# Keep function pointer types / casts readable
+PointerAlignment: Left
+
+# Struct initializers
+BreakBeforeBraces: Attach
+
+# We want compact lists when they fit
+BinPackArguments: true
+BinPackParameters: true
+AllowAllArgumentsOnNextLine: false
+AllowAllParametersOfDeclarationOnNextLine: false
+
+# Header include order
+SortIncludes: CaseSensitive
+IncludeBlocks: Preserve
+
+# Macros should not be reformatted into one-liners
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+
+# Comments
+AlignTrailingComments: true
+SpacesBeforeTrailingComments: 1
+
+# Preprocessor
+IndentPPDirectives: None
+
+# Continuation
+ContinuationIndentWidth: 4

@@ -1,0 +1,22 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+
+# Nix
+result
+result-*
+
+# Editor / IDE
+.vscode/
+.idea/
+compile_commands.json
+
+# OS
+.DS_Store
+
+# Local configuration (contains secrets)
+config.json
+
+# Runtime state (plans, sessions)
+.cagent/

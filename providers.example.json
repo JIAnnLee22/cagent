@@ -1,0 +1,9 @@
+{
+  "providers": {
+    "my-gateway": {
+      "base_url": "https://llm.example.com/v1",
+      "protocol": "openai",
+      "models_path": "/models"
+    }
+  }
+}
