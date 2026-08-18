@@ -198,6 +198,12 @@ static int test_scrolling_keeps_tail(void) {
 
 static char g_submitted[64];
 static int g_submit_count;
+static int g_escape_count;
+
+static void collect_escape(void* ud) {
+    (void)ud;
+    g_escape_count++;
+}
 
 static void collect_submit(void* ud, const char* line) {
     snprintf(g_submitted, sizeof(g_submitted), "%s", line);
@@ -252,6 +258,16 @@ static int test_model_choice(void) {
     CHECK(g_submit_count == 1);
     CHECK(strcmp(g_submitted, "DEEP") == 0);
     CHECK(!tui_choice_active(t)); /* callback below stops it */
+
+    /* An empty filter still submits the highlighted choice and must reach the
+     * callback as an empty C string rather than NULL. */
+    tui_choice_start(t, labels, 3, 1);
+    g_submit_count = 0;
+    g_submitted[0] = '\0';
+    tui_feed_bytes(t, "\r", 1);
+    CHECK(g_submit_count == 1);
+    CHECK(strcmp(g_submitted, "") == 0);
+    CHECK(!tui_choice_active(t));
 
     string_free(&screen);
     close(pipefd[0]);
@@ -369,7 +385,9 @@ static int test_input_parsing(void) {
     Tui* t = tui_new(pipefd[0]);
     CHECK(t != NULL);
     g_submit_count = 0;
+    g_escape_count = 0;
     tui_set_callbacks(t, collect_submit, NULL, NULL);
+    tui_set_escape_callback(t, collect_escape);
     for (int i = 0; i < 12; i++) {
         char line[16];
         snprintf(line, sizeof(line), "message-%d", i);
@@ -379,6 +397,12 @@ static int test_input_parsing(void) {
     CHECK(tui_model(t)->history_scroll > 0);
     tui_feed_bytes(t, "\x1b[6~", 4); /* PageDown */
     CHECK(tui_model(t)->history_scroll == 0);
+
+    /* Standalone Esc in ordinary input mode is delivered to the escape
+     * callback without affecting the editable line. */
+    tui_feed_bytes(t, "\x1b", 1);
+    CHECK(g_escape_count == 1);
+    CHECK(tui_model(t)->input.len == 0);
 
     /* UTF-8 IME input is preserved and cursor editing stays codepoint-safe. */
     tui_feed_bytes(t, "\xe4\xbd\xa0\xe5\xa5\xbd", 6); /* 你好 */

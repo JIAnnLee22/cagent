@@ -101,6 +101,42 @@ static int test_build_request_body(void) {
         CHECK(strcmp(json_obj_get_str(json_val_arr_get(tools_val, 0), "name"), "read") == 0);
         json_doc_free(doc);
     }
+
+    /* ChatGPT Codex requires Responses requests to opt out of server-side
+     * storage, while the regular Responses provider keeps its default shape. */
+    Provider* chat_provider =
+        provider_new_chatgpt("https://chatgpt.com/backend-api/codex", NULL);
+    Model* chat_model = chat_provider != NULL
+                            ? responses_model_new(chat_provider, "chatgpt/gpt-5.4", 272000, 8192)
+                            : NULL;
+    CHECK(chat_provider != NULL && chat_model != NULL);
+    if (chat_provider != NULL && chat_model != NULL) {
+        ModelRequest chat_req = req;
+        chat_req.model = chat_model;
+        String chat_body = string_new();
+        CHECK(responses_build_request_body(&chat_req, &chat_body) == AGENT_OK);
+        JsonDoc* chat_doc = json_parse(chat_body.data, chat_body.len);
+        CHECK(chat_doc != NULL);
+        if (chat_doc != NULL) {
+            JsonVal* chat_root = json_root(chat_doc);
+            CHECK(strcmp(json_obj_get_str(chat_root, "model"), "gpt-5.4") == 0);
+            JsonVal* store = json_val_obj_get(chat_root, "store");
+            CHECK(json_val_is_bool(store) && !json_val_bool(store));
+            CHECK(json_val_obj_get(chat_root, "max_output_tokens") == NULL);
+            CHECK(json_val_obj_get(chat_root, "temperature") == NULL);
+            CHECK(json_val_obj_get(chat_root, "include") == NULL);
+            json_doc_free(chat_doc);
+        }
+        string_free(&chat_body);
+        chat_model->ops->destroy(chat_model);
+        provider_free(chat_provider);
+    } else {
+        if (chat_model != NULL) {
+            chat_model->ops->destroy(chat_model);
+        }
+        provider_free(chat_provider);
+    }
+
     string_free(&body);
     message_list_free(&messages);
     tool_registry_free(tools);

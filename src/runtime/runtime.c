@@ -32,6 +32,10 @@
  * like glm-5.2. Provider-qualified selectors are normalized after discovery. */
 #define DEFAULT_BASE_URL "https://opencode.ai/zen/go/v1"
 #define CHATGPT_CODEX_BASE_URL "https://chatgpt.com/backend-api/codex"
+/* The Codex /models endpoint returns an empty catalog for obsolete client
+ * versions. Keep this in sync with the current Codex wire protocol. */
+#define CHATGPT_CLIENT_VERSION "1.0.0"
+#define MODEL_DISCOVERY_TIMEOUT_SECONDS 30
 #define DEFAULT_API_KEY_ENV "$OPENCODE_GO_API_KEY"
 #define DEFAULT_MODEL "glm-5.2"
 #define DEFAULT_MAX_TOKENS 4096
@@ -149,6 +153,7 @@ int config_load_file(Config* c, const char* path) {
         json_doc_free(doc);
         return AGENT_ERR_JSON;
     }
+    bool provider_present = json_obj_get_str(root, "provider") != NULL;
 
     const char* v = json_obj_get_str(root, "provider");
     if (v != NULL) {
@@ -189,6 +194,22 @@ int config_load_file(Config* c, const char* path) {
     if (v != NULL) {
         free(c->model_name);
         c->model_name = strdup(v);
+    }
+    /* Older configs may have persisted provider/model as one selector while
+     * omitting the provider field. Recover the provider before runtime
+     * construction so the bare model id is sent to the right endpoint. */
+    if (!provider_present && c->model_name != NULL) {
+        const char* slash = strchr(c->model_name, '/');
+        if (slash != NULL && slash != c->model_name) {
+            size_t provider_len = (size_t)(slash - c->model_name);
+            char* inferred = strndup(c->model_name, provider_len);
+            if (inferred == NULL) {
+                json_doc_free(doc);
+                return AGENT_ERR_OOM;
+            }
+            free(c->provider);
+            c->provider = inferred;
+        }
     }
     int64_t iv;
     if (json_val_is_int(json_val_obj_get(root, "max_tokens"))) {
@@ -294,12 +315,21 @@ int config_load_file(Config* c, const char* path) {
 typedef struct {
     JsonBuilder* builder;
     JsonMut* root;
+    const char* provider_name;
     const char* model_name;
+    bool provider_written;
     bool model_written;
 } ConfigSaveContext;
 
 static int config_save_member(const char* key, const JsonVal* value, void* userdata) {
     ConfigSaveContext* ctx = userdata;
+    if (strcmp(key, "provider") == 0 && ctx->provider_name != NULL) {
+        if (ctx->provider_written) {
+            return AGENT_OK;
+        }
+        ctx->provider_written = true;
+        return json_builder_obj_add_str(ctx->builder, ctx->root, "provider", ctx->provider_name);
+    }
     if (strcmp(key, "model") == 0) {
         if (ctx->model_written) {
             return AGENT_OK;
@@ -341,8 +371,10 @@ static int config_ensure_parent_dirs(const char* path) {
     return AGENT_OK;
 }
 
-int config_save_model(const char* path, const char* model_name) {
-    if (path == NULL || path[0] == '\0' || model_name == NULL || model_name[0] == '\0') {
+static int config_save_fields(const char* path, const char* provider_name,
+                              const char* model_name) {
+    if (path == NULL || path[0] == '\0' || model_name == NULL || model_name[0] == '\0' ||
+        (provider_name != NULL && provider_name[0] == '\0')) {
         return AGENT_ERR_IO;
     }
 
@@ -394,10 +426,15 @@ int config_save_model(const char* path, const char* model_name) {
     ConfigSaveContext ctx = {
         .builder = builder,
         .root = out_root,
+        .provider_name = provider_name,
         .model_name = model_name,
+        .provider_written = false,
         .model_written = false,
     };
     int rc = root != NULL ? json_obj_foreach(root, config_save_member, &ctx) : AGENT_OK;
+    if (rc == AGENT_OK && provider_name != NULL && !ctx.provider_written) {
+        rc = json_builder_obj_add_str(builder, out_root, "provider", provider_name);
+    }
     if (rc == AGENT_OK && !ctx.model_written) {
         rc = json_builder_obj_add_str(builder, out_root, "model", model_name);
     }
@@ -451,6 +488,14 @@ int config_save_model(const char* path, const char* model_name) {
     return AGENT_OK;
 }
 
+int config_save_model(const char* path, const char* model_name) {
+    return config_save_fields(path, NULL, model_name);
+}
+
+int config_save_selection(const char* path, const char* provider_name, const char* model_name) {
+    return config_save_fields(path, provider_name, model_name);
+}
+
 typedef struct {
     Config* config;
     bool done;
@@ -493,6 +538,11 @@ static void model_discovery_done(HttpRequest* req, const HttpDoneInfo* info, voi
         if (item == NULL || !json_val_is_obj(item)) {
             continue;
         }
+        const char* visibility = json_obj_get_str(item, "visibility");
+        if ((visibility != NULL && strcmp(visibility, "hide") == 0) ||
+            !json_obj_get_bool(item, "supported_in_api", true)) {
+            continue;
+        }
         const char* name = json_obj_get_str(item, "slug");
         if (name == NULL || name[0] == '\0') {
             name = json_obj_get_str(item, "id");
@@ -528,11 +578,58 @@ static void model_discovery_done(HttpRequest* req, const HttpDoneInfo* info, voi
             display = json_obj_get_str(item, "name");
         }
         entry->label = display != NULL && display[0] != '\0' ? strdup(display) : NULL;
+        /* Model catalogs are not consistent about these names.  OpenAI's
+         * /models normally uses context_length/max_completion_tokens, while
+         * some gateways use context_window/max_output_tokens (or put the
+         * limits under `limit`).  Prefer the explicit cagent names, then
+         * accept the standard aliases instead of silently falling back to
+         * the local 128k guess. */
         entry->context_window = json_obj_get_int(item, "context_window", 0);
-        if (entry->context_window <= 0) {
+        if (entry->context_window <= 0)
             entry->context_window = json_obj_get_int(item, "contextWindow", 0);
-        }
+        if (entry->context_window <= 0)
+            entry->context_window = json_obj_get_int(item, "context_length", 0);
+        if (entry->context_window <= 0)
+            entry->context_window = json_obj_get_int(item, "contextLength", 0);
+        if (entry->context_window <= 0)
+            entry->context_window = json_obj_get_int(item, "max_input_tokens", 0);
+        if (entry->context_window <= 0)
+            entry->context_window = json_obj_get_int(item, "input_token_limit", 0);
+        /* OpenCode's catalog is intentionally minimal (id/object/created),
+         * so the authoritative limit is currently documented rather than
+         * returned by /models. Keep this provider-specific fallback here,
+         * rather than poisoning the global default for unrelated providers. */
+        if (entry->context_window <= 0 && discovery->config->provider != NULL &&
+            strcmp(discovery->config->provider, "opencode-go") == 0 &&
+            strcmp(name, "gpt-5.6-luna") == 0)
+            entry->context_window = 272000;
         entry->max_output = json_obj_get_int(item, "max_output_tokens", 0);
+        if (entry->max_output <= 0)
+            entry->max_output = json_obj_get_int(item, "max_output", 0);
+        if (entry->max_output <= 0)
+            entry->max_output = json_obj_get_int(item, "max_completion_tokens", 0);
+        JsonVal* limits = json_val_obj_get(item, "limit");
+        if (limits == NULL)
+            limits = json_val_obj_get(item, "limits");
+        if (limits != NULL && json_val_is_obj(limits)) {
+            if (entry->context_window <= 0)
+                entry->context_window = json_obj_get_int(limits, "context", 0);
+            if (entry->context_window <= 0)
+                entry->context_window = json_obj_get_int(limits, "context_length", 0);
+            if (entry->max_output <= 0)
+                entry->max_output = json_obj_get_int(limits, "output", 0);
+            if (entry->max_output <= 0)
+                entry->max_output = json_obj_get_int(limits, "max_output_tokens", 0);
+        }
+        /* OpenRouter and several OpenAI-compatible catalogs expose limits in
+         * `top_provider`, not on the model object itself. */
+        JsonVal* top = json_val_obj_get(item, "top_provider");
+        if (top != NULL && json_val_is_obj(top)) {
+            if (entry->context_window <= 0)
+                entry->context_window = json_obj_get_int(top, "context_length", 0);
+            if (entry->max_output <= 0)
+                entry->max_output = json_obj_get_int(top, "max_completion_tokens", 0);
+        }
         entry->input_price = json_obj_get_num(item, "price_in", 0.0);
         entry->output_price = json_obj_get_num(item, "price_out", 0.0);
         entry->subscription = json_obj_get_bool(item, "subscription", false);
@@ -673,10 +770,22 @@ static bool chatgpt_provider_seen(char* const* names, size_t count) {
            provider_name_seen(names, count, "openai-codex");
 }
 
-static bool chatgpt_oauth_configured(void) {
-    char path[PATH_MAX];
-    return oauth_default_path(path, sizeof(path)) == AGENT_OK &&
-           oauth_provider_configured(path, "chatgpt");
+static const char* configured_chatgpt_provider(void) {
+    static char path[PATH_MAX];
+    if (oauth_default_path(path, sizeof(path)) != AGENT_OK) {
+        return NULL;
+    }
+    /* Prefer chatgpt when both entries exist: auth.json may contain a stale
+     * openai-codex entry alongside a still-valid legacy chatgpt token. */
+    bool chatgpt = oauth_provider_configured(path, "chatgpt");
+    bool codex = oauth_provider_configured(path, "openai-codex");
+    if (chatgpt) {
+        return "chatgpt";
+    }
+    if (codex) {
+        return "openai-codex";
+    }
+    return NULL;
 }
 
 static int discover_provider_probe(const Config* source, const char* provider,
@@ -784,7 +893,7 @@ int runtime_discover_models(Config* cfg, char* detail, size_t detail_cap) {
                                : (string_append_char(&url, '/') == AGENT_OK &&
                                   string_append(&url, models_path) == AGENT_OK)) != AGENT_OK ||
         (provider_is_chatgpt(provider) &&
-         string_append(&url, "?client_version=0.1.0") != AGENT_OK)) {
+         string_append(&url, "?client_version=" CHATGPT_CLIENT_VERSION) != AGENT_OK)) {
         string_free(&url);
         http_free(http);
         event_loop_free(loop);
@@ -836,7 +945,7 @@ int runtime_discover_models(Config* cfg, char* detail, size_t detail_cap) {
                           model_discovery_done, &discovery, &request);
     if (rc == AGENT_OK) {
         http_pump(http);
-        time_t deadline = time(NULL) + 4;
+        time_t deadline = time(NULL) + MODEL_DISCOVERY_TIMEOUT_SECONDS;
         while (!discovery.done && time(NULL) < deadline) {
             long timeout = http_next_timeout_ms(http);
             if (timeout < 0 || timeout > 100) {
@@ -936,11 +1045,10 @@ int runtime_discover_all_models(Config* cfg, char* failures, size_t failures_cap
             provider_count++;
         }
     }
+    const char* oauth_provider = configured_chatgpt_provider();
     if (rc == AGENT_OK && !chatgpt_provider_seen(providers, provider_count) &&
-        chatgpt_oauth_configured()) {
-        /* OAuth login persists the canonical `openai-codex` auth key. Keep
-         * that name so token refresh updates the same entry. */
-        providers[provider_count] = strdup("openai-codex");
+        oauth_provider != NULL) {
+        providers[provider_count] = strdup(oauth_provider);
         if (providers[provider_count] == NULL) {
             rc = AGENT_ERR_OOM;
         } else {

@@ -499,6 +499,20 @@ static int add_responses_tools(JsonBuilder* b, JsonMut* root, const ToolRegistry
 
 /* ---- request body ----------------------------------------------------- */
 
+static const char* responses_api_model_name(const Model* model) {
+    if (model == NULL || model->name == NULL || model->provider == NULL ||
+        model->provider->provider_name == NULL) {
+        return model != NULL ? model->name : NULL;
+    }
+    const char* provider = model->provider->provider_name;
+    size_t provider_len = strlen(provider);
+    if (strncmp(model->name, provider, provider_len) == 0 &&
+        model->name[provider_len] == '/') {
+        return model->name + provider_len + 1;
+    }
+    return model->name;
+}
+
 int responses_build_request_body(ModelRequest* req, String* out) {
     if (req == NULL || out == NULL || req->model == NULL) {
         return AGENT_ERR_MODEL;
@@ -514,19 +528,29 @@ int responses_build_request_body(ModelRequest* req, String* out) {
         return AGENT_ERR_OOM;
     }
 
-    json_builder_obj_add_str(b, root, "model", req->model->name);
+    json_builder_obj_add_str(b, root, "model", responses_api_model_name(req->model));
+    bool chatgpt = provider_is_chatgpt(req->model->provider);
+    /* ChatGPT Codex uses a restricted Responses request shape: it requires
+     * store=false and rejects max_output_tokens/temperature. */
+    if (chatgpt) {
+        json_builder_obj_add_bool(b, root, "store", false);
+    }
     json_builder_obj_add_bool(b, root, "stream", req->stream);
-    if (req->max_tokens > 0) {
+    if (!chatgpt && req->max_tokens > 0) {
         json_builder_obj_add_int(b, root, "max_output_tokens", req->max_tokens);
     }
-    json_builder_obj_add_real(b, root, "temperature", req->temperature);
-    JsonMut* include = json_builder_obj_add_arr(b, root, "include");
-    if (include == NULL ||
-        json_builder_arr_add_str(b, include, "response.output_text.delta") != AGENT_OK ||
-        json_builder_arr_add_str(b, include, "response.function_call_arguments.delta") !=
-            AGENT_OK) {
-        json_builder_free(b);
-        return AGENT_ERR_OOM;
+    if (!chatgpt) {
+        json_builder_obj_add_real(b, root, "temperature", req->temperature);
+    }
+    if (!chatgpt) {
+        JsonMut* include = json_builder_obj_add_arr(b, root, "include");
+        if (include == NULL ||
+            json_builder_arr_add_str(b, include, "response.output_text.delta") != AGENT_OK ||
+            json_builder_arr_add_str(b, include, "response.function_call_arguments.delta") !=
+                AGENT_OK) {
+            json_builder_free(b);
+            return AGENT_ERR_OOM;
+        }
     }
 
     String instructions = string_new();

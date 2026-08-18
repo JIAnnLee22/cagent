@@ -73,6 +73,8 @@ int config_load_file(Config* c, const char* path);
  * JSON settings. The path is normally ~/.config/cagent/config.json or the
  * value supplied by --config. */
 int config_save_model(const char* path, const char* model_name);
+/* Persist the active provider separately from the bare API model name. */
+int config_save_selection(const char* path, const char* provider_name, const char* model_name);
 
 typedef struct Runtime {
     Provider* provider; /* owned; default endpoint */

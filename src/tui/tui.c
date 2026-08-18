@@ -28,6 +28,7 @@ struct Tui {
     TuiModel model;
     TuiSubmitCb submit;
     TuiCancelCb cancel;
+    TuiCancelCb escape;
     TuiCancelCb choice_cancel;
     TuiCancelCb report_cancel;
     void* ud;
@@ -67,6 +68,12 @@ void tui_set_callbacks(Tui* t, TuiSubmitCb submit, TuiCancelCb cancel, void* ud)
     t->submit = submit;
     t->cancel = cancel;
     t->ud = ud;
+}
+
+void tui_set_escape_callback(Tui* t, TuiCancelCb escape) {
+    if (t != NULL) {
+        t->escape = escape;
+    }
 }
 
 void tui_set_header(Tui* t, const char* header) {
@@ -279,18 +286,21 @@ static void tui_submit_line(Tui* t) {
      * selected entry. The query is not secret and the callback normally
      * closes the choice mode, which clears it. */
     bool choice = m->choice_mode;
+    /* String uses NULL as its zero-capacity empty representation, but the
+     * application callback receives a C string and must never see NULL. */
+    const char* submitted_line = submitted.data != NULL ? submitted.data : "";
     if (!m->input_secret) {
-        tui_model_append(m, LINE_USER, submitted.data);
+        tui_model_append(m, LINE_USER, submitted_line);
     }
     if (choice && t->submit != NULL) {
-        t->submit(t->ud, submitted.data);
+        t->submit(t->ud, submitted_line);
     } else {
         /* Clear the editable buffer before ordinary callbacks so a secret can
          * never be rendered in plaintext when the callback changes mode. */
         string_clear(&m->input);
         m->cursor = 0;
         if (t->submit != NULL) {
-            t->submit(t->ud, submitted.data);
+            t->submit(t->ud, submitted_line);
         }
     }
     string_free(&submitted);
@@ -358,6 +368,8 @@ void tui_feed_bytes(Tui* t, const char* data, size_t len) {
                     tui_report_request_close(t);
                 } else if (t->model.choice_mode && t->choice_cancel != NULL) {
                     t->choice_cancel(t->ud);
+                } else if (t->escape != NULL) {
+                    t->escape(t->ud);
                 }
             }
             break;
@@ -447,6 +459,8 @@ void tui_feed_bytes(Tui* t, const char* data, size_t len) {
             tui_report_request_close(t);
         } else if (t->model.choice_mode && t->choice_cancel != NULL) {
             t->choice_cancel(t->ud);
+        } else if (t->escape != NULL) {
+            t->escape(t->ud);
         }
     }
     tui_render(t);

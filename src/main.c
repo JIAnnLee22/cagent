@@ -496,6 +496,9 @@ static bool app_selected_provider(App* app, const char* name) {
 }
 
 static void app_login_reset(App* app) {
+    if (tui_choice_active(app->tui)) {
+        tui_choice_stop(app->tui);
+    }
     app->login_step = LOGIN_NONE;
     app->login_provider[0] = '\0';
     tui_set_input_secret(app->tui, false);
@@ -598,34 +601,51 @@ static void app_start_oauth(App* app) {
     tui_set_status(app->tui, "浏览器 OAuth 登录进行中；完成后会自动返回");
 }
 
+static void app_stop_oauth(App* app) {
+    if (app->oauth_w_registered) {
+        event_loop_remove(app->rt->loop, app->oauth_fd);
+        app->oauth_w_registered = false;
+    }
+    if (app->oauth_fd >= 0) {
+        close(app->oauth_fd);
+        app->oauth_fd = -1;
+    }
+    if (app->oauth_pid > 0) {
+        kill(app->oauth_pid, SIGTERM);
+        (void)waitpid(app->oauth_pid, NULL, 0);
+        app->oauth_pid = 0;
+    }
+}
+
 static void app_login_input(App* app, const char* line) {
     if (app->login_step == LOGIN_MENU) {
-        if (strcmp(line, "1") == 0) {
+        size_t selected = tui_choice_selected_index(app->tui);
+        if (selected == 0) {
             app_login_reset(app);
             app_start_oauth(app);
             return;
         }
-        if (strcmp(line, "2") == 0) {
+        if (selected == 1) {
+            static const char* const providers[] = {"opencode-go", "xiaomi-mimo"};
+            tui_choice_start(app->tui, providers, 2, 0);
             app->login_step = LOGIN_API_PROVIDER;
             tui_model_append(tui_model(app->tui), LINE_SYSTEM,
-                             "选择 API key provider：1) opencode-go  2) xiaomi-mimo");
-            tui_set_status(app->tui, "输入 1 或 2");
+                             "选择 API key provider：");
+            tui_set_status(app->tui,
+                           "API key provider: type to filter, Up/Down choose, Enter select, Esc cancel");
             return;
         }
-        tui_set_status(app->tui, "无效选择：请输入 1 或 2");
+        tui_set_status(app->tui, "没有匹配的登录入口");
         return;
     }
     if (app->login_step == LOGIN_API_PROVIDER) {
-        const char* provider = NULL;
-        if (strcmp(line, "1") == 0) {
-            provider = "opencode-go";
-        } else if (strcmp(line, "2") == 0) {
-            provider = "xiaomi";
-        }
+        size_t selected = tui_choice_selected_index(app->tui);
+        const char* provider = selected == 0 ? "opencode-go" : selected == 1 ? "xiaomi" : NULL;
         if (provider == NULL) {
-            tui_set_status(app->tui, "无效选择：请输入 1 或 2");
+            tui_set_status(app->tui, "没有匹配的 API key provider");
             return;
         }
+        tui_choice_stop(app->tui);
         snprintf(app->login_provider, sizeof(app->login_provider), "%s", provider);
         app->login_step = LOGIN_API_KEY;
         tui_set_input_secret(app->tui, true);
@@ -687,6 +707,16 @@ static void app_model_picker_cancel(void* userdata) {
     tui_set_status(app->tui, "model selection cancelled");
 }
 
+static void app_choice_cancel(void* userdata) {
+    App* app = userdata;
+    if (app->login_step != LOGIN_NONE) {
+        app_login_reset(app);
+        tui_set_status(app->tui, "login selection cancelled");
+        return;
+    }
+    app_model_picker_cancel(app);
+}
+
 static void app_apply_model(App* app, Model* mdl) {
     if (app == NULL || mdl == NULL) {
         return;
@@ -700,15 +730,28 @@ static void app_apply_model(App* app, Model* mdl) {
         return;
     }
 
+    const char* provider = mdl->provider != NULL ? mdl->provider->provider_name : NULL;
+    const char* active_name = mdl->name;
+    if (active_name != NULL && provider != NULL) {
+        size_t provider_len = strlen(provider);
+        if (strncmp(active_name, provider, provider_len) == 0 &&
+            active_name[provider_len] == '/') {
+            active_name += provider_len + 1;
+        }
+    }
     free(app->rt->config.model_name);
-    app->rt->config.model_name = strdup(selector);
-    int save_rc = app->rt->config.model_name != NULL ? config_save_model(app->config_path, selector)
-                                                     : AGENT_ERR_OOM;
+    app->rt->config.model_name = active_name != NULL ? strdup(active_name) : NULL;
+    int save_rc = app->rt->config.model_name != NULL && provider != NULL
+                      ? config_save_selection(app->config_path, provider, active_name)
+                      : AGENT_ERR_OOM;
+    /* The persisted provider is kept separately for routing, while the
+     * active/API model name is always the bare provider model id. */
     String s = string_new();
     if (save_rc == AGENT_OK) {
-        string_printf(&s, "active model: %s (saved)", selector);
+        string_printf(&s, "active model: %s (saved)", active_name != NULL ? active_name : "(unknown)");
     } else {
-        string_printf(&s, "active model: %s (not saved: %s)", selector, error_name(save_rc));
+        string_printf(&s, "active model: %s (not saved: %s)",
+                      active_name != NULL ? active_name : "(unknown)", error_name(save_rc));
     }
     tui_model_append_n(tui_model(app->tui), LINE_SYSTEM, s.data, s.len);
     string_free(&s);
@@ -827,12 +870,13 @@ static void app_command(App* app, const char* line) {
             tui_set_status(app->tui, "OAuth login is already running");
             return;
         }
+        static const char* const login_choices[] = {"订阅（ChatGPT OAuth）", "API key"};
         app->login_step = LOGIN_MENU;
         tui_set_input_secret(app->tui, false);
-        tui_model_append(
-            m, LINE_SYSTEM,
-            "登录入口：1) 订阅（ChatGPT OAuth）  2) API key（opencode-go / xiaomi-mimo）");
-        tui_set_status(app->tui, "输入 1 或 2");
+        tui_choice_start(app->tui, login_choices, 2, 0);
+        tui_model_append(m, LINE_SYSTEM, "登录入口：");
+        tui_set_status(app->tui,
+                       "login: type to filter, Up/Down choose, Enter select, Esc cancel");
         return;
     }
 
@@ -1022,6 +1066,18 @@ static void app_submit(void* ud, const char* line) {
 
 static void app_cancel(void* ud) {
     App* app = ud;
+    if (app->oauth_pid > 0) {
+        app_stop_oauth(app);
+        app_login_reset(app);
+        tui_model_append(tui_model(app->tui), LINE_SYSTEM, "OAuth 登录已取消，返回首页。");
+        tui_set_status(app->tui, "ready");
+        return;
+    }
+    if (app->login_step != LOGIN_NONE) {
+        app_login_reset(app);
+        tui_set_status(app->tui, "登录已取消，返回首页。");
+        return;
+    }
     if (app->approval_pending) {
         app->approval_pending = false;
         (void)agent_set_approval_result(app->agent, false);
@@ -1031,6 +1087,24 @@ static void app_cancel(void* ud) {
         tui_set_status(app->tui, "cancelling...");
     } else {
         app->quit = true;
+    }
+}
+
+static void app_escape(void* ud) {
+    App* app = ud;
+    if (app->oauth_pid > 0 || app->login_step != LOGIN_NONE) {
+        app_cancel(app);
+        return;
+    }
+    if (app->approval_pending) {
+        app->approval_pending = false;
+        (void)agent_set_approval_result(app->agent, false);
+        tui_set_status(app->tui, "审批已取消，返回首页。");
+        return;
+    }
+    if (app->agent_busy) {
+        cancel_token_cancel(&app->agent->cancel);
+        tui_set_status(app->tui, "cancelling...");
     }
 }
 
@@ -1114,7 +1188,8 @@ static void tui_run(Agent* a, Runtime* rt, const char* config_path,
         event_loop_add(rt->loop, &app.discovery_w);
     }
     tui_set_callbacks(tui, app_submit, app_cancel, &app);
-    tui_set_choice_cancel_callback(tui, app_model_picker_cancel);
+    tui_set_escape_callback(tui, app_escape);
+    tui_set_choice_cancel_callback(tui, app_choice_cancel);
     tui_set_report_cancel_callback(tui, app_report_cancel);
     app_update_header(&app);
     tui_set_busy(tui, false);

@@ -79,6 +79,13 @@ static int test_config_models_parsing(void) {
     CHECK(saved.project_memory_max_bytes == 2048);
     CHECK(saved.project_memory_max_bytes_set);
     config_free(&saved);
+
+    CHECK(config_save_selection(path, "chatgpt", "gpt-5.6-sol") == AGENT_OK);
+    Config selected = config_default();
+    CHECK(config_load_file(&selected, path) == AGENT_OK);
+    CHECK(selected.provider != NULL && strcmp(selected.provider, "chatgpt") == 0);
+    CHECK(selected.model_name != NULL && strcmp(selected.model_name, "gpt-5.6-sol") == 0);
+    config_free(&selected);
     config_free(&c);
     return g_failures;
 }
@@ -241,7 +248,12 @@ static int test_live_chatgpt_model_discovery(void) {
     const char* api_body = "{\"data\":["
                            "{\"id\":\"api-model-one\",\"name\":\"API One\","
                            "\"context_window\":64000},"
-                           "{\"id\":\"api-model-two\",\"display_name\":\"API Two\"}]}";
+                           "{\"id\":\"api-model-two\",\"display_name\":\"API Two\","
+                       "\"context_length\":131072,\"max_completion_tokens\":8192},"
+                       "{\"id\":\"api-model-three\",\"limit\":{\"context\":65536,\"output\":4096}},"
+                       "{\"id\":\"api-model-four\",\"top_provider\":{\"context_length\":32768,"
+                       "\"max_completion_tokens\":2048}},"
+                       "{\"id\":\"gpt-5.6-luna\"}]}";
     pid_t api_server = test_server_start(api_port, api_body, 200);
     CHECK(api_server > 0);
     CHECK(test_server_wait(api_port, 2000) == 0);
@@ -249,13 +261,25 @@ static int test_live_chatgpt_model_discovery(void) {
     snprintf(api_base, sizeof(api_base), "http://127.0.0.1:%d/v1", api_port);
     cfg = config_default();
     free(cfg.provider);
-    cfg.provider = strdup("openai");
+    cfg.provider = strdup("opencode-go");
     cfg.base_url = strdup(api_base);
     cfg.model_name = strdup("openai/api-model-two");
     CHECK(runtime_discover_models(&cfg, NULL, 0) == AGENT_OK);
-    CHECK(cfg.n_models == 2);
+    CHECK(cfg.n_models == 5);
     CHECK(strcmp(cfg.models[0].name, "api-model-one") == 0);
     CHECK(strcmp(cfg.models[0].label, "API One") == 0);
+    CHECK(cfg.models[0].context_window == 64000);
+    CHECK(strcmp(cfg.models[1].name, "api-model-two") == 0);
+    CHECK(cfg.models[1].context_window == 131072);
+    CHECK(cfg.models[1].max_output == 8192);
+    CHECK(strcmp(cfg.models[2].name, "api-model-three") == 0);
+    CHECK(cfg.models[2].context_window == 65536);
+    CHECK(cfg.models[2].max_output == 4096);
+    CHECK(strcmp(cfg.models[3].name, "api-model-four") == 0);
+    CHECK(cfg.models[3].context_window == 32768);
+    CHECK(cfg.models[3].max_output == 2048);
+    CHECK(strcmp(cfg.models[4].name, "gpt-5.6-luna") == 0);
+    CHECK(cfg.models[4].context_window == 272000);
     CHECK(strcmp(cfg.model_name, "api-model-two") == 0); /* selector normalized to API id */
     config_free(&cfg);
     test_server_stop(api_server);

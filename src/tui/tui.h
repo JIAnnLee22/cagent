@@ -17,6 +17,7 @@
 
 typedef struct Tui Tui;
 
+/* line is always a NUL-terminated string; an empty submission is "". */
 typedef void (*TuiSubmitCb)(void* ud, const char* line);
 typedef void (*TuiCancelCb)(void* ud);
 
@@ -24,6 +25,9 @@ Tui* tui_new(int fd);
 void tui_free(Tui*);
 
 void tui_set_callbacks(Tui* t, TuiSubmitCb submit, TuiCancelCb cancel, void* ud);
+/* Called for a standalone Esc in ordinary input mode. Choice/report modes
+ * use their dedicated cancellation callbacks instead. */
+void tui_set_escape_callback(Tui* t, TuiCancelCb escape);
 void tui_set_header(Tui* t, const char* header);
 
 /* Agent event sink (registered as the agent's event_cb). */
