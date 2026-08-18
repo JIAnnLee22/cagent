@@ -51,6 +51,22 @@ static int test_estimate(void) {
     return g_failures;
 }
 
+static int test_request_estimate(void) {
+    MessageList msgs = {0};
+    message_list_append(&msgs, mk(MSG_USER, "0123456789abcdef"));
+    int64_t history = context_estimate_tokens(&msgs);
+    int64_t request = context_estimate_request_tokens("0123456789abcdef", &msgs, NULL);
+    CHECK(history == 4);
+    CHECK(request >= history + 4);
+
+    MessageList unicode = {0};
+    message_list_append(&unicode, mk(MSG_USER, "你好"));
+    CHECK(context_estimate_tokens(&unicode) == 2);
+    message_list_free(&unicode);
+    message_list_free(&msgs);
+    return g_failures;
+}
+
 static int test_needs_compact(void) {
     Model model = {0};
     model.context_window = 100;
@@ -65,6 +81,14 @@ static int test_needs_compact(void) {
     big[200] = '\0';
     message_list_append(&small, mk(MSG_USER, big));
     CHECK(context_needs_compact(&model, &small));
+
+    /* A large system prompt must also count for request-aware compaction. */
+    Model prompt_model = {0};
+    prompt_model.context_window = 10000;
+    char prompt[40001];
+    memset(prompt, 'p', sizeof(prompt) - 1);
+    prompt[sizeof(prompt) - 1] = '\0';
+    CHECK(context_needs_compact_request(&prompt_model, prompt, &small, NULL));
 
     /* unknown window: extreme size triggers */
     Model unknown = {0};
@@ -201,6 +225,7 @@ static int test_compact_keeps_summary_message_count(void) {
 int main(void) {
     g_failures = 0;
     g_failures += test_estimate();
+    g_failures += test_request_estimate();
     g_failures += test_needs_compact();
     g_failures += test_compact_keeps_system_and_tail();
     g_failures += test_compaction_prepare_and_apply();

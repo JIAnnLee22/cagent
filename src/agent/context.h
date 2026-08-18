@@ -18,13 +18,25 @@
 #include "model/model.h"
 #include "util/error.h"
 
-/* Rough estimate: total message characters / 4. */
+/* Rough local estimate of message history tokens. ASCII is treated as four
+ * bytes/token and each non-ASCII UTF-8 code point as one token. This is a
+ * display/compaction heuristic, not a provider tokenizer. */
 int64_t context_estimate_tokens(const MessageList* msgs);
 
-/* True when compaction is needed: estimate + output reserve exceed the
- * model's context window (or the window is unknown and the estimate is
- * very large). */
+/* Estimate the content sent in a normal request: system prompt, message
+ * history, and the enabled tool schema. */
+int64_t context_estimate_request_tokens(const char* system_prompt,
+                                        const MessageList* msgs,
+                                        const ToolRegistry* tools);
+
+/* True when message history alone needs compaction (legacy API). */
 bool context_needs_compact(const Model* model, const MessageList* msgs);
+
+/* Request-aware variant used by the agent loop.  Including the fixed system
+ * prompt and tool schema prevents a large hidden prompt from bypassing the
+ * compaction threshold. */
+bool context_needs_compact_request(const Model* model, const char* system_prompt,
+                                   const MessageList* msgs, const ToolRegistry* tools);
 
 /* An immutable description of one compaction operation.  request_messages
  * is owned by this object and remains valid until it is freed. */

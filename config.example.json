@@ -5,6 +5,7 @@
   "max_concurrent_agents": 16,
   "max_retries": 2,
   "context_window": 128000,
+  "project_memory_max_bytes": 4096,
   "input_price": 0.15,
   "output_price": 0.6,
   "subscription": false,

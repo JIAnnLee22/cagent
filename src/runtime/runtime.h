@@ -49,6 +49,8 @@ typedef struct {
     int64_t max_tokens;
     int64_t context_window;
     int64_t max_output;
+    int64_t project_memory_max_bytes; /* 0 disables; default 4096 */
+    bool project_memory_max_bytes_set; /* true when explicitly configured */
     bool context_window_set; /* true when the config file sets context_window */
     double input_price;  /* USD per 1M input tokens; 0 = unknown */
     double output_price; /* USD per 1M output tokens; 0 = unknown */

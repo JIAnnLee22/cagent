@@ -6,8 +6,11 @@
 #include <string.h>
 
 #include "agent/agent.h"
+#include "agent/context.h"
 #include "runtime/runtime.h"
+#include "session/session.h"
 #include "util/log.h"
+#include "util/string.h"
 
 static uint64_t g_next_agent_id = 1;
 
@@ -122,6 +125,38 @@ void agent_set_session_trusted(Agent* a, bool trusted) {
 
 bool agent_session_trusted(const Agent* a) {
     return a != NULL && a->parent == NULL && a->session_trusted;
+}
+
+int64_t agent_context_estimate_tokens(const Agent* a) {
+    if (a == NULL) {
+        return 0;
+    }
+
+    /* Mirror the bounded memory portion of build_turn_system_prompt() in
+     * loop.c.  The continuation-only instruction is transient and cannot be
+     * present while the idle footer is rendered, so it is intentionally not
+     * included here. */
+    String prompt = string_new();
+    const char* base = a->config.system_prompt != NULL ? a->config.system_prompt : "";
+    (void)string_append(&prompt, base);
+    const char* memory = a->session != NULL ? session_memory(a->session) : NULL;
+    if (memory != NULL && memory[0] != '\0') {
+        size_t memory_len = strlen(memory);
+        bool truncated = memory_len > AGENT_MEMORY_INJECTION_MAX;
+        if (truncated) {
+            memory_len = AGENT_MEMORY_INJECTION_MAX;
+        }
+        (void)string_append(&prompt,
+                            "\n\nSession memory (current session; verify against files):\n");
+        (void)string_append_n(&prompt, memory, memory_len);
+        if (truncated) {
+            (void)string_append(&prompt, "\n[memory truncated]");
+        }
+    }
+
+    int64_t estimate = context_estimate_request_tokens(prompt.data, &a->messages, a->tools);
+    string_free(&prompt);
+    return estimate;
 }
 
 Agent* agent_spawn(Agent* parent, const AgentConfig* cfg) {

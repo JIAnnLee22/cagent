@@ -41,7 +41,7 @@ static int diagnose_execute(ToolContext* ctx, const char* arguments, ToolResult*
     string_printf(&out, "agent.state=%s\nagent.messages=%zu\nagent.tool_calls=%zu\n"
                         "agent.context_tokens=%lld\nagent.cwd=%s\n",
                   state_name(agent->state), agent->messages.len, agent->tool_call_count,
-                  (long long)context_estimate_tokens(&agent->messages),
+                  (long long)agent_context_estimate_tokens(agent),
                   agent->config.cwd != NULL ? agent->config.cwd : "");
     if (agent->tools != NULL) {
         string_printf(&out, "tools.registered=%zu\n", tool_registry_count(agent->tools));

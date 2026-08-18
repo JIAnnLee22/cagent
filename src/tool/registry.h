@@ -42,6 +42,11 @@ size_t tool_registry_count(const ToolRegistry* reg);
 /* Append the OpenAI tools array JSON (only enabled tools). */
 int tool_registry_schema_json(const ToolRegistry* reg, String* out);
 
+/* Return the compact JSON byte size of the enabled tools schema.  This is
+ * used for the local context-pressure estimate; it does not expose or retain
+ * the temporary JSON buffer. */
+int tool_registry_schema_bytes(const ToolRegistry* reg, size_t* out_bytes);
+
 /* The stock registry with the Phase 1 builtin tools. */
 ToolRegistry* tool_registry_default(void);
 

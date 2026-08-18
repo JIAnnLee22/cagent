@@ -85,6 +85,9 @@ static int test_schema_json(void) {
 
     String out = string_new();
     CHECK(tool_registry_schema_json(reg, &out) == AGENT_OK);
+    size_t schema_bytes = 0;
+    CHECK(tool_registry_schema_bytes(reg, &schema_bytes) == AGENT_OK);
+    CHECK(schema_bytes == out.len);
 
     /* parse and verify the structure */
     JsonDoc* doc = json_parse(out.data, out.len);
@@ -113,6 +116,9 @@ static int test_schema_json(void) {
     JsonDoc* doc2 = json_parse(out2.data, out2.len);
     JsonVal* arr2 = json_root(doc2);
     CHECK(json_val_arr_size(arr2) == 1);
+    size_t reduced_bytes = 0;
+    CHECK(tool_registry_schema_bytes(reg, &reduced_bytes) == AGENT_OK);
+    CHECK(reduced_bytes < schema_bytes);
     JsonVal* only = json_val_arr_get(arr2, 0);
     CHECK(strcmp(json_obj_get_str(json_val_obj_get(only, "function"), "name"), "write") == 0);
 

@@ -58,6 +58,11 @@ typedef struct {
     char* cwd;           /* owned; may be NULL (runtime default) */
 } AgentConfig;
 
+/* Maximum session-memory bytes appended to a normal request's system prompt.
+ * Keep this shared by the loop and the UI estimator so their accounting does
+ * not drift. */
+#define AGENT_MEMORY_INJECTION_MAX 8192
+
 /* ---- minimal event seed (Phase 6: formal Event Bus) ------------------ */
 
 typedef enum {
@@ -140,6 +145,11 @@ void agent_set_approval_cb(Agent* a, AgentApprovalCb cb, void* userdata);
 int agent_set_approval_result(Agent* a, bool approved);
 void agent_set_session_trusted(Agent* a, bool trusted);
 bool agent_session_trusted(const Agent* a);
+
+/* Estimate the effective normal-request context, including the configured
+ * system prompt, bounded session memory, message history, and enabled tool
+ * schemas. Used by diagnostics and the UI; this remains a heuristic. */
+int64_t agent_context_estimate_tokens(const Agent* a);
 
 /* Replace the agent's model (tests use a mock; the runtime keeps owning
  * the original). The new model is borrowed. */

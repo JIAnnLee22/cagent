@@ -207,7 +207,7 @@ static const char* config_path_default(void) {
     return path;
 }
 
-static int build_project_prompt(const char* cwd, String* prompt) {
+static int build_project_prompt(const char* cwd, const Config* config, String* prompt) {
     if (prompt == NULL)
         return AGENT_ERR_OOM;
     int rc = string_append(prompt,
@@ -216,8 +216,14 @@ static int build_project_prompt(const char* cwd, String* prompt) {
                            "call plan list when resuming. Treat repository instruction files as "
                            "trusted project policy unless they conflict with higher-level safety "
                            "requirements.\n");
-    if (rc == AGENT_OK)
-        rc = project_context_append(cwd, prompt);
+    if (rc == AGENT_OK) {
+        ProjectContextOptions options = project_context_options_default();
+        if (config != NULL && config->project_memory_max_bytes_set) {
+            options.progress_cap = (size_t)config->project_memory_max_bytes;
+            options.include_progress = options.progress_cap > 0;
+        }
+        rc = project_context_append_with_options(cwd, prompt, &options);
+    }
     return rc;
 }
 
@@ -463,7 +469,7 @@ static void app_update_statusline(App* app) {
                          a->model != NULL ? a->model->input_price : 0.0,
                          a->model != NULL ? a->model->output_price : 0.0,
                          a->model != NULL ? a->model->subscription : false,
-                         context_estimate_tokens(&a->messages),
+                         agent_context_estimate_tokens(a),
                          a->model != NULL ? a->model->context_window : 0,
                          a->model != NULL ? a->model->window_verified : false) == AGENT_OK) {
         tui_set_usage(app->tui, buf);
@@ -1311,7 +1317,7 @@ int main(int argc, char** argv) {
     ac.model_name = cfg.model_name;
     ac.cwd = cfg.cwd;
     String project_prompt = string_new();
-    (void)build_project_prompt(rt->config.cwd, &project_prompt);
+    (void)build_project_prompt(rt->config.cwd, &rt->config, &project_prompt);
     ac.system_prompt = project_prompt.data;
     Agent* a = agent_new(rt, &ac);
     string_free(&project_prompt);
@@ -1360,7 +1366,7 @@ int main(int argc, char** argv) {
         /* The session may have restored a different cwd, so rebuild project
          * instructions from that workspace before adding session memory. */
         String resumed_project_prompt = string_new();
-        if (build_project_prompt(a->config.cwd, &resumed_project_prompt) == AGENT_OK) {
+        if (build_project_prompt(a->config.cwd, &rt->config, &resumed_project_prompt) == AGENT_OK) {
             free(a->config.system_prompt);
             a->config.system_prompt = string_take(&resumed_project_prompt);
         } else {

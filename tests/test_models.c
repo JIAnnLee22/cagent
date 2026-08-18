@@ -31,6 +31,7 @@ static int test_config_models_parsing(void) {
         fputs("{\n"
               "  \"max_retries\": 3,\n"
               "  \"context_window\": 272000,\n"
+              "  \"project_memory_max_bytes\": 2048,\n"
               "  \"price_in\": 0.2,\n"
               "  \"price_out\": 0.8,\n"
               "  \"models\": [\n"
@@ -53,6 +54,8 @@ static int test_config_models_parsing(void) {
     CHECK(c.max_retries == 3);
     CHECK(c.context_window == 272000);
     CHECK(c.context_window_set);
+    CHECK(c.project_memory_max_bytes == 2048);
+    CHECK(c.project_memory_max_bytes_set);
     CHECK(c.input_price == 0.2);
     CHECK(c.output_price == 0.8);
     CHECK(strcmp(c.models[0].name, "opencode-go/kimi-k3") == 0);
@@ -73,6 +76,8 @@ static int test_config_models_parsing(void) {
     CHECK(config_load_file(&saved, path) == AGENT_OK);
     CHECK(saved.model_name != NULL && strcmp(saved.model_name, "opencode-go/deepseek-v4-pro") == 0);
     CHECK(saved.n_models == 2); /* model save preserves the other settings */
+    CHECK(saved.project_memory_max_bytes == 2048);
+    CHECK(saved.project_memory_max_bytes_set);
     config_free(&saved);
     config_free(&c);
     return g_failures;
@@ -485,6 +490,33 @@ static int test_project_context_hierarchy(void) {
     CHECK(strstr(prompt.data, "root:x:") == NULL); /* instruction symlinks are ignored */
     CHECK(strstr(prompt.data, "root-rule") < strstr(prompt.data, "nested-rule"));
     string_free(&prompt);
+
+    /* Large project memory is an excerpt, not an unconditional full-file
+     * injection. Both the beginning and the latest tail remain available. */
+    f = fopen(path, "w");
+    CHECK(f != NULL);
+    if (f != NULL) {
+        fputs("progress-head\n", f);
+        for (int i = 0; i < 7000; i++) {
+            fputc('x', f);
+        }
+        fputs("\nprogress-tail\n", f);
+        fclose(f);
+    }
+    String capped = string_new();
+    CHECK(project_context_append(nested, &capped) == AGENT_OK);
+    CHECK(strstr(capped.data, "progress-head") != NULL);
+    CHECK(strstr(capped.data, "progress-tail") != NULL);
+    CHECK(strstr(capped.data, "[context truncated]") != NULL);
+    CHECK(strlen(capped.data) < 5000);
+    string_free(&capped);
+
+    ProjectContextOptions no_memory = project_context_options_default();
+    no_memory.include_progress = false;
+    String without_progress = string_new();
+    CHECK(project_context_append_with_options(nested, &without_progress, &no_memory) == AGENT_OK);
+    CHECK(strstr(without_progress.data, "progress-head") == NULL);
+    string_free(&without_progress);
     return g_failures;
 }
 

@@ -8,43 +8,98 @@
 
 #include "agent/context.h"
 #include "agent/message.h"
+#include "tool/registry.h"
 #include "util/string.h"
 
 #define OUTPUT_RESERVE 8192
 #define COMPACT_MIN_KEEP 4
 #define SUMMARY_INPUT_MAX_CHARS (256 * 1024)
 
+static void count_text_units(const char* text, int64_t* ascii_bytes, int64_t* codepoints) {
+    if (text == NULL || ascii_bytes == NULL || codepoints == NULL) {
+        return;
+    }
+    const unsigned char* bytes = (const unsigned char*)text;
+    size_t len = strlen(text);
+    size_t i = 0;
+    while (i < len) {
+        unsigned char c = bytes[i];
+        if (c < 0x80) {
+            (*ascii_bytes)++;
+            i++;
+            continue;
+        }
+        /* Count one token-like unit per UTF-8 leading byte.  Malformed input
+         * is conservatively counted as one unit per byte. */
+        (*codepoints)++;
+        size_t width = 1;
+        if ((c & 0xe0) == 0xc0 && i + 1 < len && (bytes[i + 1] & 0xc0) == 0x80) {
+            width = 2;
+        } else if ((c & 0xf0) == 0xe0 && i + 2 < len &&
+                   (bytes[i + 1] & 0xc0) == 0x80 && (bytes[i + 2] & 0xc0) == 0x80) {
+            width = 3;
+        } else if ((c & 0xf8) == 0xf0 && i + 3 < len &&
+                   (bytes[i + 1] & 0xc0) == 0x80 && (bytes[i + 2] & 0xc0) == 0x80 &&
+                   (bytes[i + 3] & 0xc0) == 0x80) {
+            width = 4;
+        }
+        i += width;
+    }
+}
+
+static int64_t units_to_tokens(int64_t ascii_bytes, int64_t codepoints) {
+    return ascii_bytes / 4 + codepoints;
+}
+
 int64_t context_estimate_tokens(const MessageList* msgs) {
-    int64_t chars = 0;
+    int64_t ascii_bytes = 0;
+    int64_t codepoints = 0;
     if (msgs == NULL) {
         return 0;
     }
     for (size_t i = 0; i < msgs->len; i++) {
         const Message* m = &msgs->items[i];
-        if (m->content != NULL) {
-            chars += (int64_t)strlen(m->content);
-        }
-        if (m->reasoning != NULL) {
-            chars += (int64_t)strlen(m->reasoning);
-        }
+        count_text_units(m->content, &ascii_bytes, &codepoints);
+        count_text_units(m->reasoning, &ascii_bytes, &codepoints);
         for (size_t k = 0; k < m->tool_calls.len; k++) {
             const ToolCall* tc = &m->tool_calls.items[k];
-            if (tc->name != NULL) {
-                chars += (int64_t)strlen(tc->name);
-            }
-            if (tc->arguments != NULL) {
-                chars += (int64_t)strlen(tc->arguments);
-            }
-            if (tc->result != NULL) {
-                chars += (int64_t)strlen(tc->result);
-            }
+            count_text_units(tc->name, &ascii_bytes, &codepoints);
+            count_text_units(tc->arguments, &ascii_bytes, &codepoints);
+            count_text_units(tc->result, &ascii_bytes, &codepoints);
         }
     }
-    return chars / 4;
+    return units_to_tokens(ascii_bytes, codepoints);
+}
+
+static int64_t text_estimate_tokens(const char* text) {
+    int64_t ascii_bytes = 0;
+    int64_t codepoints = 0;
+    count_text_units(text, &ascii_bytes, &codepoints);
+    return units_to_tokens(ascii_bytes, codepoints);
+}
+
+int64_t context_estimate_request_tokens(const char* system_prompt, const MessageList* msgs,
+                                        const ToolRegistry* tools) {
+    int64_t estimate = context_estimate_tokens(msgs);
+    estimate += text_estimate_tokens(system_prompt);
+    if (tools != NULL) {
+        size_t schema_bytes = 0;
+        if (tool_registry_schema_bytes(tools, &schema_bytes) == AGENT_OK) {
+            /* Tool schemas are predominantly ASCII JSON, so use the same
+             * conservative four-bytes/token heuristic as message text. */
+            estimate += (int64_t)(schema_bytes / 4);
+        }
+    }
+    return estimate;
 }
 
 bool context_needs_compact(const Model* model, const MessageList* msgs) {
-    int64_t estimate = context_estimate_tokens(msgs);
+    return context_needs_compact_request(model, NULL, msgs, NULL);
+}
+
+bool context_needs_compact_request(const Model* model, const char* system_prompt,
+                                   const MessageList* msgs, const ToolRegistry* tools) {
+    int64_t estimate = context_estimate_request_tokens(system_prompt, msgs, tools);
     int64_t window = model != NULL ? model->context_window : 0;
 
     if (window <= 0) {

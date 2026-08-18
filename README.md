@@ -22,7 +22,7 @@ ctest --test-dir build         # 27 个测试（Debug + ASan 双构建）
 # API key provider 使用 ~/.config/cagent/auth.json 配置密钥来源
 ```
 
-配置文件 `~/.config/cagent/config.json`（参考 `config.example.json`）只保存 `provider`/`base_url`/`protocol`/`model`/`models[]` 等运行配置。鉴权统一保存于 `~/.config/cagent/auth.json`（参考 `auth.example.json`）：
+配置文件 `~/.config/cagent/config.json`（参考 `config.example.json`）只保存 `provider`/`base_url`/`protocol`/`model`/`models[]` 等运行配置。`project_memory_max_bytes` 可调整自动注入的根 `PROGRESS.md` 摘要上限（默认 4096，设为 0 可关闭）；鉴权统一保存于 `~/.config/cagent/auth.json`（参考 `auth.example.json`）：
 
 ```json
 {
@@ -109,7 +109,7 @@ cagent --login             # ChatGPT Plus/Codex OAuth 登录；TUI 内可用 /lo
 
 工具调用没有固定轮数上限；每次模型请求前都会根据所选模型的 `context_window` 估算上下文压力，接近窗口时在同一 Session 内生成并持久化 compaction 摘要，随后以“摘要 + 最近消息”开启下一次模型请求。Session ID、plan、memory 和恢复链保持连续。失控任务需使用 Ctrl+C 主动取消；trusted 模式仍只应在受信任且可回滚的工作区短时启用。
 
-模型文本按 SSE delta 实时显示；`--resume` 启动后会先回显用户、助手和工具历史。TUI 顶栏显示 session id，`/session` 可输出完整恢复命令。项目规则按 Git 根到当前目录加载，每层优先 `AGENTS.override.md`，其次 `AGENTS.md`/`AGENTS.MD`、`CLAUDE.md`/`CLAUDE.MD`；根目录 `PROGRESS.md` 作为项目记忆，总输入有 128 KiB 上限，子代理继承同一规则。
+模型文本按 SSE delta 实时显示；`--resume` 启动后会先回显用户、助手和工具历史。TUI 顶栏显示 session id，`/session` 可输出完整恢复命令。项目规则按 Git 根到当前目录加载，每层优先 `AGENTS.override.md`，其次 `AGENTS.md`/`AGENTS.MD`、`CLAUDE.md`/`CLAUDE.MD`；根目录 `PROGRESS.md` 作为项目记忆，但默认只注入最多 4 KiB 的头尾摘要（完整内容仍可用 `read` 工具按需读取），总输入有 128 KiB 上限，子代理继承同一规则。底部上下文比例估算同时包含 system prompt、消息历史和启用工具 schema，并用于接近窗口时的自动 compaction。
 
 **多协议模型**：OpenCode Go 目录中部分模型走 Anthropic Messages 协议（MiniMax/Qwen 等），部分模型走 Responses API（GPT/Grok 等）。在 `models[]` 中标注 `"protocol": "anthropic"` 或 `"protocol": "responses"`，provider 会自动选择对应端点与工具调用格式。
 

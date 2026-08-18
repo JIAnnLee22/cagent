@@ -386,7 +386,7 @@ TUI 采用 backend-only 迁移：`TuiModel`、`tui_render_screen()` 和 Agent/Ev
 ## 4. 配置与 CLI（Phase 1 范围 + 多模型 + 多协议）
 - **三协议 Provider + 统一认证**（DESIGN.md §7）：OpenAI Compatible（chat/completions）+ Anthropic Messages（/v1/messages，tool_use 块、tool_result 消息）+ OpenAI Responses（/responses，input items、output delta、function call）；鉴权统一来自 `~/.config/cagent/auth.json`，通过 `"type": "api_key"|"oauth"` 区分。内置 provider 为 `opencode-go`、`openai`、`anthropic`、`chatgpt`；自定义 provider 放在 `~/.config/cagent/providers.json`。`models[]` 每项可设 `provider` 和 `protocol`；label 可作 `--model`/`/model` 选择别名。
 - 默认 provider：OpenCode Go 订阅（内置 endpoint `https://opencode.ai/zen/go/v1`）；内置 provider 还包括 OpenAI、Anthropic、ChatGPT Codex。自定义 provider 在 `~/.config/cagent/providers.json` 中声明 `base_url`/`protocol`/`models_path`。
-- 多模型表（DESIGN.md §7）：`config.json` 的 `models[]` 每项可含 `name`/`label`/`provider`/`base_url`/`protocol`/`context_window`/`max_output`；鉴权统一由 `~/.config/cagent/auth.json` 提供；`runtime_model_by_name()` 按名字或 label 查找。
+- 多模型表（DESIGN.md §7）：`config.json` 的 `models[]` 每项可含 `name`/`label`/`provider`/`base_url`/`protocol`/`context_window`/`max_output`；顶层 `project_memory_max_bytes` 控制根 `PROGRESS.md` 自动摘要上限（默认 4096，0 表示关闭）；鉴权统一由 `~/.config/cagent/auth.json` 提供；`runtime_model_by_name()` 按名字或 label 查找。
 
 - 配置优先级：**CLI > 环境变量 > `~/.config/cagent/config.json` > 默认值**。
 - 鉴权统一使用 `~/.config/cagent/auth.json`（原子写入、0600）；API key 和 OAuth 令牌禁止进入日志、TUI、Session 和错误文本。

@@ -165,3 +165,14 @@ int tool_registry_schema_json(const ToolRegistry* reg, String* out) {
     json_builder_free(b);
     return err;
 }
+
+int tool_registry_schema_bytes(const ToolRegistry* reg, size_t* out_bytes) {
+    if (reg == NULL || out_bytes == NULL) {
+        return AGENT_ERR_TOOL;
+    }
+    String schema = string_new();
+    int rc = tool_registry_schema_json(reg, &schema);
+    *out_bytes = rc == AGENT_OK ? schema.len : 0;
+    string_free(&schema);
+    return rc;
+}

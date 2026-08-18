@@ -670,8 +670,6 @@ static void finish_compaction(Agent* a, AgentLoopState* st) {
  * to the model on every normal turn (not only after resume), capped so the
  * per-turn overhead stays small. Returns the system prompt to use for the
  * current request (either the config prompt or the injected copy). */
-#define MEMORY_INJECTION_MAX 8192
-
 static const char* build_turn_system_prompt(Agent* a, AgentLoopState* st) {
     const char* base = a->config.system_prompt != NULL ? a->config.system_prompt : "";
     const char* mem = a->session != NULL ? session_memory(a->session) : NULL;
@@ -684,9 +682,9 @@ static const char* build_turn_system_prompt(Agent* a, AgentLoopState* st) {
     string_append(&st->memory_injection, base);
     if (inject_memory) {
         size_t mem_len = strlen(mem);
-        bool truncated = mem_len > MEMORY_INJECTION_MAX;
+        bool truncated = mem_len > AGENT_MEMORY_INJECTION_MAX;
         if (truncated) {
-            mem_len = MEMORY_INJECTION_MAX;
+            mem_len = AGENT_MEMORY_INJECTION_MAX;
         }
         string_append(&st->memory_injection,
                       "\n\nSession memory (current session; verify against files):\n");
@@ -747,7 +745,9 @@ static int start_model_request(Agent* a, AgentLoopState* st) {
 static int start_request(Agent* a, AgentLoopState* st) {
     st->request_retries = 0;
     st->retry_pending = false;
-    if (!st->skip_compaction_once && context_needs_compact(a->model, &a->messages)) {
+    const char* turn_prompt = build_turn_system_prompt(a, st);
+    if (!st->skip_compaction_once &&
+        context_needs_compact_request(a->model, turn_prompt, &a->messages, a->tools)) {
         int rc = start_compaction_request(a, st);
         if (rc == AGENT_OK && st->compaction_active) {
             return AGENT_OK; /* the summary request is now in flight */

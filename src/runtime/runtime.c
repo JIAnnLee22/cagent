@@ -38,6 +38,7 @@
 #define DEFAULT_CONTEXT_WINDOW 128000
 #define DEFAULT_MAX_OUTPUT 8192
 #define DEFAULT_MAX_RETRIES 2
+#define DEFAULT_PROJECT_MEMORY_MAX_BYTES (4 * 1024)
 
 static bool legacy_auth_is_chatgpt(const char* auth) {
     return auth != NULL && strcmp(auth, "chatgpt") == 0;
@@ -78,6 +79,10 @@ Config config_default(void) {
     c.max_output = DEFAULT_MAX_OUTPUT;
     c.max_concurrent_agents = 16;
     c.max_retries = DEFAULT_MAX_RETRIES;
+    /* A separate set bit lets config.json explicitly use zero to disable
+     * the automatic PROGRESS.md excerpt. */
+    c.project_memory_max_bytes = DEFAULT_PROJECT_MEMORY_MAX_BYTES;
+    c.project_memory_max_bytes_set = false;
     return c;
 }
 
@@ -216,6 +221,13 @@ int config_load_file(Config* c, const char* path) {
         iv = json_obj_get_int(root, "max_retries", DEFAULT_MAX_RETRIES);
         if (iv >= 0 && iv <= 10)
             c->max_retries = iv;
+    }
+    if (json_val_is_int(json_val_obj_get(root, "project_memory_max_bytes"))) {
+        iv = json_obj_get_int(root, "project_memory_max_bytes", 0);
+        if (iv >= 0 && iv <= 128 * 1024) {
+            c->project_memory_max_bytes = iv;
+            c->project_memory_max_bytes_set = true;
+        }
     }
     /* models array: [{name, label?, provider?, base_url?, api_key_env?,
      *                context_window?, max_output?, price_in?, price_out?,
@@ -1358,6 +1370,11 @@ Runtime* runtime_new(const Config* cfg) {
         }
         if (cfg->max_retries >= 0) {
             rt->config.max_retries = cfg->max_retries;
+        }
+        if (cfg->project_memory_max_bytes_set || cfg->project_memory_max_bytes > 0) {
+            rt->config.project_memory_max_bytes = cfg->project_memory_max_bytes;
+            rt->config.project_memory_max_bytes_set =
+                cfg->project_memory_max_bytes_set || cfg->project_memory_max_bytes > 0;
         }
         if (rt->config.base_url == NULL && cfg->base_url != NULL) {
             runtime_free(rt);
