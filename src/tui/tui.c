@@ -14,6 +14,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "tui/format.h"
 #include "tui/terminal.h"
 #include "tui/tui.h"
 #include "util/log.h"
@@ -121,9 +122,7 @@ void tui_replay_history(Tui* t, const MessageList* messages) {
             }
             for (size_t j = 0; j < msg->tool_calls.len; j++) {
                 const ToolCall* tc = &msg->tool_calls.items[j];
-                String line = string_new();
-                string_printf(&line, "%s %s", tc->name != NULL ? tc->name : "tool",
-                              tc->arguments != NULL ? tc->arguments : "{}");
+                String line = tui_format_tool_call_summary(tc->name, tc->arguments);
                 tui_model_append_n(&t->model, LINE_TOOL, line.data, line.len);
                 string_free(&line);
             }
@@ -158,21 +157,21 @@ void tui_on_agent_event(void* ud, const AgentEvent* ev) {
         }
         break;
     case AGENT_EVT_TOOL_START: {
-        String line = string_new();
-        string_printf(&line, "%s %s", ev->name != NULL ? ev->name : "?",
-                      ev->text != NULL ? ev->text : "");
+        String line = tui_format_tool_call_summary(ev->name, ev->text);
         tui_model_append_n(m, LINE_TOOL, line.data, line.len);
         string_free(&line);
         break;
     }
     case AGENT_EVT_TOOL_APPROVAL: {
         String line = string_new();
+        String fallback = tui_format_tool_call_summary(ev->name, ev->text);
         string_printf(&line,
                       "审批请求：%s\n变更预览：\n%s\n输入 /approve 执行，/reject 拒绝，"
                       "或 /trust on 开启本进程自动批准",
                       ev->name != NULL ? ev->name : "?",
-                      ev->preview != NULL ? ev->preview : (ev->text != NULL ? ev->text : "{}"));
+                      ev->preview != NULL ? ev->preview : fallback.data);
         tui_model_append_n(m, LINE_SYSTEM, line.data, line.len);
+        string_free(&fallback);
         string_free(&line);
         break;
     }

@@ -83,6 +83,7 @@ add_library(cagent_core STATIC
   src/runtime/scheduler.c
   src/session/session.c
   src/report/report.c
+  src/tui/format.c
   src/tui/render.c
   src/tui/terminal.c
   src/tui/tui.c
@@ -194,6 +195,7 @@ if(BUILD_TESTING)
     tool_registry
     tools
     tui
+    tui_format
     vector
   )
 

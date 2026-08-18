@@ -28,6 +28,7 @@
 
 #include "agent/agent.h"
 #include "agent/context.h"
+#include "tui/format.h"
 #include "auth/oauth.h"
 #include "model/provider.h"
 #include "runtime/event_loop.h"
@@ -78,15 +79,21 @@ static void print_event(void* userdata, const AgentEvent* ev) {
         }
         fflush(stdout);
         break;
-    case AGENT_EVT_TOOL_START:
-        printf("\n> %s %s\n", ev->name != NULL ? ev->name : "?", ev->text != NULL ? ev->text : "");
+    case AGENT_EVT_TOOL_START: {
+        String summary = tui_format_tool_call_summary(ev->name, ev->text);
+        printf("\n> %s\n", summary.data);
+        string_free(&summary);
         fflush(stdout);
         break;
-    case AGENT_EVT_TOOL_APPROVAL:
+    }
+    case AGENT_EVT_TOOL_APPROVAL: {
+        String fallback = tui_format_tool_call_summary(ev->name, ev->text);
         printf("\napproval required: %s\n%s\n", ev->name != NULL ? ev->name : "?",
-               ev->preview != NULL ? ev->preview : (ev->text != NULL ? ev->text : "{}"));
+               ev->preview != NULL ? ev->preview : fallback.data);
+        string_free(&fallback);
         fflush(stdout);
         break;
+    }
     case AGENT_EVT_TOOL_END:
         printf("%s %s\n", ev->is_error ? "\xe2\x9c\x97" : "\xe2\x9c\x93",
                ev->name != NULL ? ev->name : "?");
@@ -235,11 +242,12 @@ typedef struct {
     LoginStep login_step;
     char login_provider[32];
     const char* config_path;
-    Model** picker_models;
-    size_t n_picker_models;
+    char** picker_selectors; /* owned; resolve against the current catalog on submit */
+    size_t n_picker_selectors;
     bool model_picker;
     bool approval_pending;
     bool quit;
+    bool quit_pending;
     bool agent_busy;
     struct AppDiscovery* discovery; /* borrowed; completion pipe watcher */
     LoopWatcher discovery_w;
@@ -372,12 +380,22 @@ static AppDiscovery* discovery_start(Config* cfg) {
  * the event loop (TUI) or the REPL loop; safe because the worker has
  * finished (pipe ordering) before it runs. The worker writes exactly one
  * byte, so a single read suffices (a blocking read-loop would hang). */
-static void discovery_apply(AppDiscovery* d, Runtime* rt) {
+static void discovery_apply(AppDiscovery* d, Runtime* rt, Agent* agent) {
+    char selected[PATH_MAX];
+    bool have_selected = agent != NULL && agent->model != NULL &&
+                         runtime_model_selector(rt, agent->model, selected, sizeof(selected)) == AGENT_OK;
     if (d->pipefd[0] >= 0) {
         char buf[64];
         (void)read(d->pipefd[0], buf, sizeof(buf));
     }
-    (void)runtime_apply_catalog(rt, d->cfg);
+    int rc = runtime_apply_catalog(rt, d->cfg);
+    if (rc == AGENT_OK && agent != NULL && have_selected) {
+        /* Catalog replacement destroys named Model objects. Rebind the live
+         * agent by its stable selector before any status/header code can use
+         * the old pointer. */
+        Model* rebound = runtime_model_by_name(rt, selected);
+        agent_set_model(agent, rebound != NULL ? rebound : rt->model);
+    }
     config_free(d->cfg);
     free(d->cfg);
     d->cfg = NULL;
@@ -404,14 +422,14 @@ static void discovery_notice(AppDiscovery* d) {
  * which happens-after the worker's last access to d, so d can be freed
  * then; otherwise the worker is still running and the process exit reaps
  * it (and its heap state). */
-static void discovery_finish(AppDiscovery* d, Runtime* rt) {
+static void discovery_finish(AppDiscovery* d, Runtime* rt, Agent* agent) {
     if (d == NULL) {
         return;
     }
     d->cancel = true;
     if (d->done && !d->reported) {
         d->reported = true;
-        discovery_apply(d, rt);
+        discovery_apply(d, rt, agent);
         discovery_notice(d);
     }
     if (d->pipefd[0] >= 0) {
@@ -648,9 +666,12 @@ static void app_model_picker_close(App* app) {
         return;
     }
     tui_choice_stop(app->tui);
-    free(app->picker_models);
-    app->picker_models = NULL;
-    app->n_picker_models = 0;
+    for (size_t i = 0; i < app->n_picker_selectors; i++) {
+        free(app->picker_selectors[i]);
+    }
+    free(app->picker_selectors);
+    app->picker_selectors = NULL;
+    app->n_picker_selectors = 0;
     app->model_picker = false;
 }
 
@@ -690,10 +711,23 @@ static void app_apply_model(App* app, Model* mdl) {
 
 static void app_model_picker_submit(App* app) {
     size_t index = tui_choice_selected_index(app->tui);
-    Model* mdl = index < app->n_picker_models ? app->picker_models[index] : NULL;
+    char* selector = index < app->n_picker_selectors
+                        ? strdup(app->picker_selectors[index])
+                        : NULL;
     app_model_picker_close(app);
-    if (mdl == NULL) {
+    if (selector == NULL) {
         tui_model_append(tui_model(app->tui), LINE_SYSTEM, "no model matches the current query");
+        tui_set_status(app->tui, "model selection cancelled");
+        return;
+    }
+
+    /* The catalog may have been replaced while the picker was open. Resolve
+     * the selector only after closing the picker so the lookup uses current
+     * model objects instead of stale pointers. */
+    Model* mdl = runtime_model_by_name(app->rt, selector);
+    free(selector);
+    if (mdl == NULL) {
+        tui_model_append(tui_model(app->tui), LINE_SYSTEM, "selected model is no longer available");
         tui_set_status(app->tui, "model selection cancelled");
         return;
     }
@@ -706,11 +740,8 @@ static void app_model_picker_open(App* app) {
         tui_model_append(tui_model(app->tui), LINE_SYSTEM, "(no models available)");
         return;
     }
-    Model** models = calloc(capacity, sizeof(*models));
-    const char** labels = calloc(capacity, sizeof(*labels));
-    if (models == NULL || labels == NULL) {
-        free(models);
-        free(labels);
+    char** selectors = calloc(capacity, sizeof(*selectors));
+    if (selectors == NULL) {
         tui_set_status(app->tui, "cannot open model selector (out of memory)");
         return;
     }
@@ -729,34 +760,28 @@ static void app_model_picker_open(App* app) {
         if (runtime_model_selector(app->rt, candidate, selector, sizeof(selector)) != AGENT_OK) {
             continue;
         }
-        labels[count] = strdup(selector);
-        if (labels[count] == NULL) {
+        selectors[count] = strdup(selector);
+        if (selectors[count] == NULL) {
             for (size_t j = 0; j < count; j++)
-                free((void*)labels[j]);
-            free(labels);
-            free(models);
+                free(selectors[j]);
+            free(selectors);
             tui_set_status(app->tui, "cannot open model selector (out of memory)");
             return;
         }
-        models[count] = candidate;
         if (candidate == current) {
             selected = count;
         }
         count++;
     }
     if (count == 0) {
-        free(labels);
-        free(models);
+        free(selectors);
         tui_model_append(tui_model(app->tui), LINE_SYSTEM, "(no models available)");
         return;
     }
-    app->picker_models = models;
-    app->n_picker_models = count;
+    app->picker_selectors = selectors;
+    app->n_picker_selectors = count;
     app->model_picker = true;
-    tui_choice_start(app->tui, labels, count, selected);
-    for (size_t i = 0; i < count; i++)
-        free((void*)labels[i]);
-    free(labels);
+    tui_choice_start(app->tui, (const char* const*)selectors, count, selected);
     tui_set_status(app->tui,
                    "model: type to fuzzy-filter, Up/Down choose, Enter select, Esc cancel");
 }
@@ -959,7 +984,13 @@ static void app_submit(void* ud, const char* line) {
     }
     if (strcmp(line, "/quit") == 0 || strcmp(line, "/exit") == 0 || strcmp(line, "exit") == 0 ||
         strcmp(line, "quit") == 0) {
-        app->quit = true;
+        if (app->agent_busy) {
+            app->quit_pending = true;
+            cancel_token_cancel(&app->agent->cancel);
+            tui_set_status(app->tui, "cancelling before exit...");
+        } else {
+            app->quit = true;
+        }
         return;
     }
     if (app->login_step != LOGIN_NONE) {
@@ -1004,7 +1035,13 @@ static void app_stdin_cb(EventLoop* loop, int fd, uint32_t events, void* ud) {
     char buf[256];
     ssize_t n = read(fd, buf, sizeof(buf));
     if (n <= 0) {
-        app->quit = true; /* EOF */
+        if (app->agent_busy) {
+            app->quit_pending = true;
+            cancel_token_cancel(&app->agent->cancel);
+            tui_set_status(app->tui, "cancelling before exit...");
+        } else {
+            app->quit = true;
+        }
         return;
     }
     tui_feed_bytes(app->tui, buf, (size_t)n);
@@ -1017,9 +1054,15 @@ static void app_discovery_cb(EventLoop* loop, int fd, uint32_t events, void* use
     if (d == NULL || !d->done || d->reported) {
         return;
     }
+    /* Do not replace model objects while the agent or one of its subagents
+     * may still have a request using them. The pipe remains readable and the
+     * callback will retry after the turn completes. */
+    if (app->agent_busy) {
+        return;
+    }
     d->reported = true;
     event_loop_remove(loop, fd);
-    discovery_apply(d, app->rt);
+    discovery_apply(d, app->rt, app->agent);
     tui_set_busy(app->tui, false);
     app_update_statusline(app); /* the catalog may carry a fresh context_window */
     if (d->failures[0] == '\0') {
@@ -1096,6 +1139,9 @@ static void tui_run(Agent* a, Runtime* rt, const char* config_path,
                     tui_set_status(tui, "cancelled; ready for the next request");
                 } else {
                     tui_set_status(tui, "ready");
+                }
+                if (app.quit_pending) {
+                    app.quit = true;
                 }
             }
         }
@@ -1380,7 +1426,7 @@ int main(int argc, char** argv) {
         if (session != NULL) {
             session_append_stats(session);
         }
-        discovery_finish(discovery, rt);
+        discovery_finish(discovery, rt, a);
         agent_destroy(a);
         session_free(session);
         runtime_free(rt);
@@ -1400,7 +1446,7 @@ int main(int argc, char** argv) {
             if (discovery != NULL && discovery->thread_started && discovery->done &&
                 !discovery->reported) {
                 discovery->reported = true;
-                discovery_apply(discovery, rt);
+                discovery_apply(discovery, rt, a);
                 discovery_notice(discovery);
             }
             printf("> ");
@@ -1441,7 +1487,7 @@ int main(int argc, char** argv) {
         tui_run(a, rt, fpath, discovery);
     }
 
-    discovery_finish(discovery, rt);
+    discovery_finish(discovery, rt, a);
 
     if (session != NULL) {
         session_append_stats(session);
