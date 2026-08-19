@@ -158,9 +158,16 @@ static ToolCallState* accum_ensure_call(Accum* a, size_t index) {
 }
 
 static void call_state_set(char** dst, const char* value) {
-    if (value == NULL || *dst != NULL) {
+    if (dst == NULL || value == NULL || value[0] == '\0') {
         return;
     }
+    /* Some gateways send an empty call_id in output_item.added and the real
+     * value in output_item.done.  Empty is not a valid value and must not
+     * prevent the later authoritative ID from being recorded. */
+    if (*dst != NULL && (*dst)[0] != '\0') {
+        return;
+    }
+    free(*dst);
     *dst = strdup(value);
 }
 
@@ -178,11 +185,19 @@ static void finish_stream(Accum* a, ModelStopReason reason) {
     if (a->done_emitted || a->error_emitted) {
         return;
     }
+    /* A Responses function_call cannot be replayed without its authoritative
+     * call_id.  Do not let a partial/variant stream turn that missing value
+     * into call_id:"" on the next request. */
     for (size_t i = 0; i < vector_len(&a->calls); i++) {
         ToolCallState* state = vector_at(&a->calls, i);
-        if (state->seen_start) {
-            emit_tool_end(a, state->index);
+        if (!state->seen_start || state->call_id == NULL || state->call_id[0] == '\0') {
+            emit_error(a, AGENT_ERR_MODEL, "Responses function call missing call_id");
+            return;
         }
+    }
+    for (size_t i = 0; i < vector_len(&a->calls); i++) {
+        ToolCallState* state = vector_at(&a->calls, i);
+        emit_tool_end(a, state->index);
     }
     if (reason == MODEL_STOP_COMPLETE && vector_len(&a->calls) > 0) {
         reason = MODEL_STOP_TOOL_CALLS;
@@ -191,7 +206,10 @@ static void finish_stream(Accum* a, ModelStopReason reason) {
 }
 
 static void emit_call_start_if_needed(Accum* a, ToolCallState* state) {
-    if (state != NULL && !state->seen_start) {
+    /* output_item.added may omit call_id; wait for output_item.done rather
+     * than emitting an unusable tool call with a NULL/empty identifier. */
+    if (state != NULL && !state->seen_start && state->call_id != NULL &&
+        state->call_id[0] != '\0') {
         emit_tool_start(a, state->index, state->call_id, state->name);
         state->seen_start = true;
         if (state->pending_arguments.len > 0) {
@@ -255,7 +273,8 @@ static int handle_event(Accum* a, const char* json, size_t len) {
         if (delta != NULL) {
             emit_reasoning(a, delta, strlen(delta));
         }
-    } else if (strcmp(type, "response.output_item.added") == 0) {
+    } else if (strcmp(type, "response.output_item.added") == 0 ||
+               strcmp(type, "response.output_item.done") == 0) {
         int64_t index = json_obj_get_int(root, "output_index", -1);
         JsonVal* item = json_val_obj_get(root, "item");
         const char* item_type = item != NULL ? json_obj_get_str(item, "type") : NULL;
@@ -266,14 +285,26 @@ static int handle_event(Accum* a, const char* json, size_t len) {
                 json_doc_free(doc);
                 return AGENT_ERR_OOM;
             }
-            call_state_set(&state->call_id, json_obj_get_str(item, "call_id"));
-            call_state_set(&state->name, json_obj_get_str(item, "name"));
-            emit_call_start_if_needed(a, state);
-            const char* args = json_obj_get_str(item, "arguments");
-            if (args != NULL && args[0] != '\0') {
-                emit_tool_delta(a, state->index, args, strlen(args));
-                state->argument_len += strlen(args);
+            const char* call_id = json_obj_get_str(item, "call_id");
+            if (call_id == NULL || call_id[0] == '\0') {
+                /* A few Responses-compatible gateways put the field on the
+                 * event envelope instead of the output item. */
+                call_id = json_obj_get_str(root, "call_id");
             }
+            call_state_set(&state->call_id, call_id);
+            call_state_set(&state->name, json_obj_get_str(item, "name"));
+            const char* args = json_obj_get_str(item, "arguments");
+            if (args != NULL && args[0] != '\0' && state->argument_len == 0) {
+                if (state->seen_start) {
+                    emit_tool_delta(a, state->index, args, strlen(args));
+                    state->argument_len = strlen(args);
+                } else if (state->pending_arguments.len == 0 &&
+                           string_append(&state->pending_arguments, args) != AGENT_OK) {
+                    json_doc_free(doc);
+                    return AGENT_ERR_OOM;
+                }
+            }
+            emit_call_start_if_needed(a, state);
         }
     } else if (strcmp(type, "response.function_call_arguments.delta") == 0) {
         int64_t index = json_obj_get_int(root, "output_index", -1);
@@ -301,14 +332,15 @@ static int handle_event(Accum* a, const char* json, size_t len) {
                 json_doc_free(doc);
                 return AGENT_ERR_OOM;
             }
-            if (!state->seen_start && args[0] != '\0') {
+            if (!state->seen_start && args[0] != '\0' && state->argument_len == 0 &&
+                state->pending_arguments.len == 0) {
                 if (string_append(&state->pending_arguments, args) != AGENT_OK) {
                     json_doc_free(doc);
                     return AGENT_ERR_OOM;
                 }
             }
             emit_call_start_if_needed(a, state);
-            if (state->argument_len == 0 && args[0] != '\0') {
+            if (state->seen_start && state->argument_len == 0 && args[0] != '\0') {
                 emit_tool_delta(a, state->index, args, strlen(args));
                 state->argument_len = strlen(args);
             }
@@ -439,24 +471,33 @@ static int add_input_message(JsonBuilder* b, JsonMut* input, const char* role, c
 }
 
 static int add_function_call(JsonBuilder* b, JsonMut* input, const ToolCall* tc) {
+    if (tc == NULL || tc->id == NULL || tc->id[0] == '\0' || tc->name == NULL ||
+        tc->name[0] == '\0') {
+        /* call_id is the cross-turn identity in the Responses protocol;
+         * never serialize an empty placeholder that the API will reject. */
+        return AGENT_ERR_MODEL;
+    }
     JsonMut* item = json_builder_arr_add_obj(b, input);
     if (item == NULL) {
         return AGENT_ERR_OOM;
     }
     json_builder_obj_add_str(b, item, "type", "function_call");
-    json_builder_obj_add_str(b, item, "call_id", tc->id != NULL ? tc->id : "");
-    json_builder_obj_add_str(b, item, "name", tc->name != NULL ? tc->name : "");
+    json_builder_obj_add_str(b, item, "call_id", tc->id);
+    json_builder_obj_add_str(b, item, "name", tc->name);
     json_builder_obj_add_str(b, item, "arguments", tc->arguments != NULL ? tc->arguments : "");
     return AGENT_OK;
 }
 
 static int add_function_output(JsonBuilder* b, JsonMut* input, const Message* m) {
+    if (m == NULL || m->tool_call_id == NULL || m->tool_call_id[0] == '\0') {
+        return AGENT_ERR_MODEL;
+    }
     JsonMut* item = json_builder_arr_add_obj(b, input);
     if (item == NULL) {
         return AGENT_ERR_OOM;
     }
     json_builder_obj_add_str(b, item, "type", "function_call_output");
-    json_builder_obj_add_str(b, item, "call_id", m->tool_call_id != NULL ? m->tool_call_id : "");
+    json_builder_obj_add_str(b, item, "call_id", m->tool_call_id);
     json_builder_obj_add_str(b, item, "output", m->content != NULL ? m->content : "");
     return AGENT_OK;
 }

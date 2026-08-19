@@ -325,7 +325,12 @@ static int append_tool_result(Agent* a, ToolCall* tc, ToolResult* result) {
         result->content = NULL;
         return AGENT_ERR_OOM;
     }
-    tm->tool_call_id = strdup(tc->id != NULL ? tc->id : "");
+    /* A missing call id is invalid for every provider's tool-result
+     * protocol. Keep it NULL so the provider serializer can fail closed,
+     * rather than manufacturing call_id:"". */
+    if (tc->id != NULL && tc->id[0] != '\0') {
+        tm->tool_call_id = strdup(tc->id);
+    }
     tm->content = result->content; /* ownership transferred */
     result->content = NULL;
     tm->is_error = result->is_error;

@@ -71,6 +71,27 @@ static int test_config_models_parsing(void) {
     CHECK(c.models[1].subscription);
     CHECK(c.models[1].base_url == NULL); /* inherits the global default */
 
+    /* A pre-fix config can retain the OpenCode endpoint after selecting
+     * ChatGPT. Missing per-model providers must not make those static models
+     * change subscription on the next launch. */
+    char legacy_path[600];
+    snprintf(legacy_path, sizeof(legacy_path), "%s/legacy-selection.json", g_tmpdir);
+    FILE* legacy = fopen(legacy_path, "w");
+    CHECK(legacy != NULL);
+    if (legacy != NULL) {
+        fputs("{\"provider\":\"chatgpt\",\"base_url\":\"https://opencode.ai/zen/go/v1\","
+              "\"models\":[{\"name\":\"kimi-k3\"}]}\n",
+              legacy);
+        fclose(legacy);
+    }
+    Config migrated = config_default();
+    CHECK(config_load_file(&migrated, legacy_path) == AGENT_OK);
+    CHECK(migrated.provider != NULL && strcmp(migrated.provider, "chatgpt") == 0);
+    CHECK(migrated.n_models == 1 && migrated.models[0].provider != NULL &&
+          strcmp(migrated.models[0].provider, "opencode-go") == 0);
+    config_free(&migrated);
+    unlink(legacy_path);
+
     CHECK(config_save_model(path, "opencode-go/deepseek-v4-pro") == AGENT_OK);
     Config saved = config_default();
     CHECK(config_load_file(&saved, path) == AGENT_OK);
@@ -131,6 +152,45 @@ static int test_runtime_model_lookup(void) {
     CHECK(runtime_model_by_name(rt, "no-such-model") == NULL);
 
     runtime_free(rt);
+    return g_failures;
+}
+
+static int test_model_provider_isolation(void) {
+    setenv("CAGENT_TEST_KEY", "test", 1);
+    Config cfg = config_default();
+    free(cfg.provider);
+    cfg.provider = strdup("chatgpt");
+    cfg.auth = strdup("chatgpt");
+    cfg.model_name = strdup("chat-model");
+    cfg.n_models = 2;
+    cfg.models = calloc(2, sizeof(ModelConfig));
+    cfg.models[0].name = strdup("openai-model");
+    cfg.models[0].provider = strdup("openai");
+    cfg.models[0].api_key_env = strdup("$CAGENT_TEST_KEY");
+    cfg.models[1].name = strdup("claude-model");
+    cfg.models[1].provider = strdup("anthropic");
+    cfg.models[1].api_key_env = strdup("$CAGENT_TEST_KEY");
+
+    Runtime* rt = runtime_new(&cfg);
+    config_free(&cfg);
+    CHECK(rt != NULL);
+    if (rt == NULL) {
+        unsetenv("CAGENT_TEST_KEY");
+        return g_failures;
+    }
+    CHECK(rt->n_models == 2);
+    CHECK(rt->models[0]->provider != NULL &&
+          strcmp(rt->models[0]->provider->provider_name, "openai") == 0);
+    CHECK(rt->models[1]->provider != NULL &&
+          strcmp(rt->models[1]->provider->provider_name, "anthropic") == 0);
+    char selector[128];
+    CHECK(runtime_model_selector(rt, rt->models[0], selector, sizeof(selector)) == AGENT_OK);
+    CHECK(strcmp(selector, "openai/openai-model") == 0);
+    CHECK(runtime_model_selector(rt, rt->models[1], selector, sizeof(selector)) == AGENT_OK);
+    CHECK(strcmp(selector, "anthropic/claude-model") == 0);
+
+    runtime_free(rt);
+    unsetenv("CAGENT_TEST_KEY");
     return g_failures;
 }
 
@@ -237,7 +297,7 @@ static int test_live_chatgpt_model_discovery(void) {
     FILE* api_auth = fopen(token_path, "w");
     CHECK(api_auth != NULL);
     if (api_auth != NULL) {
-        fputs("{\"type\":\"api_key\",\"provider\":\"openai\","
+        fputs("{\"type\":\"api_key\",\"provider\":\"opencode-go\","
               "\"api_key_env\":\"CAGENT_DISCOVERY_KEY\"}\n",
               api_auth);
         fclose(api_auth);
@@ -263,7 +323,7 @@ static int test_live_chatgpt_model_discovery(void) {
     free(cfg.provider);
     cfg.provider = strdup("opencode-go");
     cfg.base_url = strdup(api_base);
-    cfg.model_name = strdup("openai/api-model-two");
+    cfg.model_name = strdup("opencode-go/api-model-two");
     CHECK(runtime_discover_models(&cfg, NULL, 0) == AGENT_OK);
     CHECK(cfg.n_models == 5);
     CHECK(strcmp(cfg.models[0].name, "api-model-one") == 0);
@@ -612,6 +672,7 @@ int main(void) {
 
     g_failures += test_config_models_parsing();
     g_failures += test_runtime_model_lookup();
+    g_failures += test_model_provider_isolation();
     g_failures += test_agent_model_selection();
     g_failures += test_catalog_refreshes_default_model();
     g_failures += test_live_chatgpt_model_discovery();

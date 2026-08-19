@@ -249,6 +249,7 @@ typedef struct {
     char login_provider[32];
     const char* config_path;
     char** picker_selectors; /* owned; resolve against the current catalog on submit */
+    char** picker_labels;    /* owned; display labels, may omit a redundant provider */
     size_t n_picker_selectors;
     bool model_picker;
     bool approval_pending;
@@ -694,9 +695,12 @@ static void app_model_picker_close(App* app) {
     tui_choice_stop(app->tui);
     for (size_t i = 0; i < app->n_picker_selectors; i++) {
         free(app->picker_selectors[i]);
+        free(app->picker_labels[i]);
     }
     free(app->picker_selectors);
+    free(app->picker_labels);
     app->picker_selectors = NULL;
+    app->picker_labels = NULL;
     app->n_picker_selectors = 0;
     app->model_picker = false;
 }
@@ -758,6 +762,24 @@ static void app_apply_model(App* app, Model* mdl) {
     app_update_header(app);
 }
 
+static const char* app_model_bare_name(const Runtime* rt, const Model* model) {
+    if (model == NULL || model->name == NULL) {
+        return NULL;
+    }
+    const char* provider = model->provider != NULL ? model->provider->provider_name : NULL;
+    if (provider == NULL || provider[0] == '\0') {
+        provider = rt != NULL && rt->config.provider != NULL ? rt->config.provider : NULL;
+    }
+    if (provider != NULL) {
+        size_t provider_len = strlen(provider);
+        if (strncmp(model->name, provider, provider_len) == 0 &&
+            model->name[provider_len] == '/') {
+            return model->name + provider_len + 1;
+        }
+    }
+    return model->name;
+}
+
 static void app_model_picker_submit(App* app) {
     size_t index = tui_choice_selected_index(app->tui);
     char* selector = index < app->n_picker_selectors
@@ -795,6 +817,35 @@ static void app_model_picker_open(App* app) {
         return;
     }
 
+    /* Provider-qualified selectors remain the stable internal value.  When
+     * every choice comes from one provider, hide that repeated prefix in the
+     * picker; it adds noise without disambiguating anything. */
+    const char* first_provider = NULL;
+    bool multiple_providers = false;
+    for (size_t source = 0; source < capacity; source++) {
+        Model* candidate = app->rt->model != NULL
+                               ? (source == 0 ? app->rt->model : app->rt->models[source - 1])
+                               : app->rt->models[source];
+        if (candidate == NULL) {
+            continue;
+        }
+        const char* provider = candidate->provider != NULL ? candidate->provider->provider_name : NULL;
+        if (provider == NULL || provider[0] == '\0') {
+            provider = app->rt->config.provider;
+        }
+        if (first_provider == NULL) {
+            first_provider = provider;
+        } else if (provider == NULL || strcmp(first_provider, provider) != 0) {
+            multiple_providers = true;
+        }
+    }
+
+    char** labels = calloc(capacity, sizeof(*labels));
+    if (labels == NULL) {
+        free(selectors);
+        tui_set_status(app->tui, "cannot open model selector (out of memory)");
+        return;
+    }
     size_t count = 0;
     size_t selected = 0;
     Model* current = app->agent->model;
@@ -810,10 +861,17 @@ static void app_model_picker_open(App* app) {
             continue;
         }
         selectors[count] = strdup(selector);
-        if (selectors[count] == NULL) {
-            for (size_t j = 0; j < count; j++)
+        const char* display = multiple_providers ? selector : app_model_bare_name(app->rt, candidate);
+        labels[count] = display != NULL ? strdup(display) : NULL;
+        if (selectors[count] == NULL || labels[count] == NULL) {
+            free(selectors[count]);
+            free(labels[count]);
+            for (size_t j = 0; j < count; j++) {
                 free(selectors[j]);
+                free(labels[j]);
+            }
             free(selectors);
+            free(labels);
             tui_set_status(app->tui, "cannot open model selector (out of memory)");
             return;
         }
@@ -824,13 +882,15 @@ static void app_model_picker_open(App* app) {
     }
     if (count == 0) {
         free(selectors);
+        free(labels);
         tui_model_append(tui_model(app->tui), LINE_SYSTEM, "(no models available)");
         return;
     }
     app->picker_selectors = selectors;
+    app->picker_labels = labels;
     app->n_picker_selectors = count;
     app->model_picker = true;
-    tui_choice_start(app->tui, (const char* const*)selectors, count, selected);
+    tui_choice_start(app->tui, (const char* const*)labels, count, selected);
     tui_set_status(app->tui,
                    "model: type to fuzzy-filter, Up/Down choose, Enter select, Esc cancel");
 }
@@ -848,11 +908,11 @@ static void app_report_cancel(void* userdata) {
 
 static void app_update_header(App* app) {
     String header = string_new();
-    char selector[PATH_MAX];
-    const char* model = "(none)";
-    if (app->agent->model != NULL && runtime_model_selector(app->rt, app->agent->model, selector,
-                                                            sizeof(selector)) == AGENT_OK) {
-        model = selector;
+    const char* model = app->agent->model != NULL
+                            ? app_model_bare_name(app->rt, app->agent->model)
+                            : NULL;
+    if (model == NULL) {
+        model = "(none)";
     }
     const char* session_id = app->agent->session != NULL ? app->agent->session->id : "(none)";
     string_printf(&header, " cagent%s | model: %s | session: %s | PgUp/PgDn | Ctrl+C cancel",
@@ -922,19 +982,16 @@ static void app_command(App* app, const char* line) {
 
     if (strcmp(line, "/settings") == 0 || strcmp(line, "/help") == 0) {
         String s = string_new();
-        char default_selector[PATH_MAX];
-        const char* default_model = app->rt->config.model_name;
-        if (app->rt->model != NULL &&
-            runtime_model_selector(app->rt, app->rt->model, default_selector,
-                                   sizeof(default_selector)) == AGENT_OK) {
-            default_model = default_selector;
-        }
+        const char* default_model = app->rt->model != NULL
+                                        ? app_model_bare_name(app->rt, app->rt->model)
+                                        : app->rt->config.model_name;
         string_printf(&s, "base_url: %s\n",
                       app->rt->config.base_url != NULL ? app->rt->config.base_url : "(unset)");
         string_printf(&s, "model:    %s (default)\n",
                       default_model != NULL ? default_model : "(unset)");
         if (app->agent->model != NULL && app->agent->model != app->rt->model) {
-            string_printf(&s, "active:   %s\n", app->agent->model->name);
+            string_printf(&s, "active:   %s\n",
+                          app_model_bare_name(app->rt, app->agent->model));
         }
         string_printf(&s, "key:      %s\n",
                       app->rt->provider != NULL && app->rt->provider->api_key != NULL

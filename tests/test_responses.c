@@ -102,6 +102,28 @@ static int test_build_request_body(void) {
         json_doc_free(doc);
     }
 
+    /* Never turn a missing model call id into call_id:"". That produces a
+     * remote 400 and leaves the next agent turn unable to make progress. */
+    MessageList invalid_messages = {0};
+    Message* invalid_assistant = message_new(MSG_ASSISTANT);
+    ToolCall* invalid_call = calloc(1, sizeof(ToolCall));
+    CHECK(invalid_assistant != NULL && invalid_call != NULL);
+    if (invalid_assistant != NULL && invalid_call != NULL) {
+        invalid_call->name = strdup("read");
+        invalid_call->arguments = strdup("{}");
+        tool_call_list_append(&invalid_assistant->tool_calls, invalid_call);
+        message_list_append(&invalid_messages, invalid_assistant);
+        ModelRequest invalid_req = req;
+        invalid_req.messages = &invalid_messages;
+        String invalid_body = string_new();
+        CHECK(responses_build_request_body(&invalid_req, &invalid_body) == AGENT_ERR_MODEL);
+        string_free(&invalid_body);
+    } else {
+        message_free(invalid_assistant);
+        free(invalid_call);
+    }
+    message_list_free(&invalid_messages);
+
     /* ChatGPT Codex requires Responses requests to opt out of server-side
      * storage, while the regular Responses provider keeps its default shape. */
     Provider* chat_provider =
@@ -215,13 +237,19 @@ static int test_streaming(void) {
         "data: {\"type\":\"response.output_text.delta\",\"delta\":\"world\"}\n\n"
         "data: "
         "{\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_"
-        "call\",\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"\"}}\n\n"
+        "call\",\"call_id\":\"\",\"name\":\"read\",\"arguments\":\"\"}}\n\n"
         "data: "
         "{\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{"
         "\\\"path\\\":\"}\n\n"
         "data: "
         "{\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"\\\"a."
         "c\\\"}\"}\n\n"
+        /* Some gateways provide the authoritative call_id only when the
+         * output item is complete. The parser must wait instead of emitting
+         * an empty id. */
+        "data: "
+        "{\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\","
+        "\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a.c\\\"}\"}}\n\n"
         "data: "
         "{\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_"
         "tokens\":5,\"total_tokens\":15}}}\n\n";

@@ -48,14 +48,57 @@ static bool legacy_auth_is_chatgpt(const char* auth) {
     return auth != NULL && strcmp(auth, "chatgpt") == 0;
 }
 
+static bool provider_name_is_chatgpt(const char* provider) {
+    return provider != NULL &&
+           (strcmp(provider, "chatgpt") == 0 || strcmp(provider, "openai-codex") == 0);
+}
+
+static bool provider_names_equal(const char* left, const char* right) {
+    if (left == NULL || right == NULL) {
+        return left == right;
+    }
+    return strcmp(left, right) == 0 ||
+           (provider_name_is_chatgpt(left) && provider_name_is_chatgpt(right));
+}
+
+static const char* builtin_provider_for_base_url(const char* base_url) {
+    static const char* const names[] = {"opencode-go", "openai", "anthropic", "chatgpt"};
+    if (base_url == NULL) {
+        return NULL;
+    }
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        const char* builtin = provider_builtin_base_url(names[i]);
+        if (builtin != NULL && strcmp(base_url, builtin) == 0) {
+            return names[i];
+        }
+    }
+    return NULL;
+}
+
 static Provider* provider_from_config(const char* base_url, const char* provider_name,
                                       const char* api_key_env, const char* auth) {
     char path[PATH_MAX];
     if (oauth_default_path(path, sizeof(path)) != AGENT_OK) {
         path[0] = '\0';
     }
-    if (legacy_auth_is_chatgpt(auth)) {
-        return provider_new_chatgpt(base_url, path[0] != '\0' ? path : NULL);
+    /* The legacy auth flag belongs only to the ChatGPT provider.  Do not let
+     * a global `auth: chatgpt` turn explicitly configured OpenAI/Anthropic
+     * model entries into ChatGPT models (and therefore give them all the
+     * `chatgpt/` selector prefix). */
+    if (legacy_auth_is_chatgpt(auth) &&
+        (provider_name_is_chatgpt(provider_name) ||
+         (provider_name != NULL && strcmp(provider_name, "opencode-go") == 0))) {
+        Provider* p = provider_new_chatgpt(base_url, path[0] != '\0' ? path : NULL);
+        if (p != NULL && provider_name != NULL && strcmp(provider_name, p->provider_name) != 0) {
+            char* name = strdup(provider_name);
+            if (name == NULL) {
+                provider_free(p);
+                return NULL;
+            }
+            free(p->provider_name);
+            p->provider_name = name;
+        }
+        return p;
     }
     return provider_new_auth(base_url, provider_name, path[0] != '\0' ? path : NULL, api_key_env);
 }
@@ -304,6 +347,24 @@ int config_load_file(Config* c, const char* path) {
                 c->n_models = filled;
             } else {
                 free(mc);
+            }
+        }
+    }
+
+    /* A selection saved by an older version may have changed the top-level
+     * provider while leaving the old builtin endpoint in place. Preserve
+     * provider-less static entries on that old provider instead of silently
+     * reinterpreting every OpenCode model as a ChatGPT model. Live discovery
+     * will replace these entries when it succeeds. */
+    const char* legacy_provider = builtin_provider_for_base_url(c->base_url);
+    if (legacy_provider != NULL && !provider_names_equal(legacy_provider, c->provider)) {
+        for (size_t i = 0; i < c->n_models; i++) {
+            if (c->models[i].provider == NULL) {
+                c->models[i].provider = strdup(legacy_provider);
+                if (c->models[i].provider == NULL) {
+                    json_doc_free(doc);
+                    return AGENT_ERR_OOM;
+                }
             }
         }
     }
@@ -788,6 +849,52 @@ static const char* configured_chatgpt_provider(void) {
     return NULL;
 }
 
+static bool config_has_chatgpt_model(const Config* cfg, const char* model_name) {
+    if (cfg == NULL || model_name == NULL) {
+        return false;
+    }
+    for (size_t i = 0; i < cfg->n_models; i++) {
+        const char* provider = cfg->models[i].provider != NULL
+                                   ? cfg->models[i].provider
+                                   : cfg->provider;
+        if (provider_name_is_chatgpt(provider) && cfg->models[i].name != NULL &&
+            strcmp(cfg->models[i].name, model_name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int config_add_chatgpt_fallbacks(Config* cfg) {
+    if (cfg == NULL || configured_chatgpt_provider() == NULL) {
+        return AGENT_OK;
+    }
+
+    /* Keep the current picker useful while the asynchronous /models request
+     * is still running (or when it is temporarily unavailable). The live
+     * catalog remains authoritative and replaces these entries afterwards. */
+    static const char* const names[] = {"gpt-5.6-sol", "gpt-5.6-terra"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (config_has_chatgpt_model(cfg, names[i])) {
+            continue;
+        }
+        ModelConfig fallback = {0};
+        fallback.name = strdup(names[i]);
+        fallback.provider = strdup("chatgpt");
+        fallback.base_url = strdup(CHATGPT_CODEX_BASE_URL);
+        fallback.protocol = strdup("responses");
+        fallback.context_window = 272000;
+        fallback.max_output = DEFAULT_MAX_OUTPUT;
+        fallback.subscription = true;
+        if (fallback.name == NULL || fallback.provider == NULL || fallback.base_url == NULL ||
+            fallback.protocol == NULL || model_config_append(cfg, &fallback) != AGENT_OK) {
+            model_config_free(&fallback);
+            return AGENT_ERR_OOM;
+        }
+    }
+    return AGENT_OK;
+}
+
 static int discover_provider_probe(const Config* source, const char* provider,
                                    const ModelConfig* hint, Config* probe) {
     *probe = config_default();
@@ -1016,7 +1123,7 @@ int runtime_discover_all_models(Config* cfg, char* failures, size_t failures_cap
     /* Discover the selected provider, providers explicitly named by model
      * entries, and ChatGPT when a complete OAuth login is present. This keeps
      * unrelated builtins lazy while making `cagent --login` visible in /model. */
-    size_t name_cap = static_count + 2;
+    size_t name_cap = static_count + 3;
     char** providers = calloc(name_cap, sizeof(*providers));
     if (providers == NULL) {
         for (size_t i = 0; i < static_count; i++)
@@ -1053,6 +1160,32 @@ int runtime_discover_all_models(Config* cfg, char* failures, size_t failures_cap
             rc = AGENT_ERR_OOM;
         } else {
             provider_count++;
+        }
+    }
+
+    /* OpenCode Go is the default API-key subscription. Keep it discoverable
+     * even after the user selects ChatGPT as the current provider, provided
+     * credentials for it are actually available. This is what makes both
+     * subscriptions appear in one model picker without probing unrelated
+     * providers. */
+    if (rc == AGENT_OK && !provider_name_seen(providers, provider_count, "opencode-go")) {
+        char auth_path[PATH_MAX];
+        if (oauth_default_path(auth_path, sizeof(auth_path)) != AGENT_OK) {
+            auth_path[0] = '\0';
+        }
+        Provider* opencode = provider_new_auth(
+            provider_builtin_base_url("opencode-go"), "opencode-go",
+            auth_path[0] != '\0' ? auth_path : NULL, provider_builtin_key_env("opencode-go"));
+        bool available = opencode != NULL && opencode->api_key != NULL &&
+                         opencode->api_key[0] != '\0';
+        provider_free(opencode);
+        if (available) {
+            providers[provider_count] = strdup("opencode-go");
+            if (providers[provider_count] == NULL) {
+                rc = AGENT_ERR_OOM;
+            } else {
+                provider_count++;
+            }
         }
     }
 
@@ -1180,6 +1313,21 @@ static int config_resolve_provider(Config* c) {
     const char* builtin_protocol = provider_builtin_protocol(c->provider);
     const char* builtin_key = provider_builtin_key_env(c->provider);
     if (builtin_base != NULL) {
+        /* `config_save_selection()` historically persisted only provider and
+         * model. If the user switched subscriptions, base_url/protocol/key
+         * can therefore belong to the previous builtin provider. Do not send
+         * a ChatGPT OAuth token to the OpenCode endpoint (or vice versa). */
+        const char* base_provider = builtin_provider_for_base_url(c->base_url);
+        if (base_provider != NULL && !provider_names_equal(base_provider, c->provider)) {
+            free(c->base_url);
+            c->base_url = NULL;
+            free(c->protocol);
+            c->protocol = NULL;
+            free(c->api_key_env);
+            c->api_key_env = NULL;
+            free(c->models_path);
+            c->models_path = NULL;
+        }
         if (c->base_url == NULL) {
             c->base_url = strdup(builtin_base);
         }
@@ -1266,8 +1414,12 @@ static int runtime_build_models(Runtime* rt) {
         }
         for (size_t i = 0; i < rt->config.n_models; i++) {
             ModelConfig* mc = &rt->config.models[i];
-            const char* mauth = mc->auth != NULL ? mc->auth : rt->config.auth;
             const char* mprovider = mc->provider != NULL ? mc->provider : rt->config.provider;
+            bool same_provider = provider_names_equal(mprovider, rt->config.provider);
+            /* Credentials are scoped to a provider.  In particular, a
+             * legacy global ChatGPT auth setting must not be inherited by a
+             * model explicitly assigned to another provider. */
+            const char* mauth = mc->auth != NULL ? mc->auth : (same_provider ? rt->config.auth : NULL);
             const char* base = mc->base_url != NULL ? mc->base_url : rt->config.base_url;
             if (mc->base_url == NULL && mprovider != NULL &&
                 (rt->config.provider == NULL || strcmp(mprovider, rt->config.provider) != 0)) {
@@ -1275,7 +1427,10 @@ static int runtime_build_models(Runtime* rt) {
                 if (builtin != NULL)
                     base = builtin;
             }
-            const char* keyenv = mc->api_key_env != NULL ? mc->api_key_env : rt->config.api_key_env;
+            const char* keyenv = mc->api_key_env != NULL
+                                     ? mc->api_key_env
+                                     : (same_provider ? rt->config.api_key_env
+                                                       : provider_builtin_key_env(mprovider));
             Provider* p = provider_from_config(base, mprovider, keyenv, mauth);
             if (p == NULL) {
                 continue;
@@ -1516,6 +1671,10 @@ Runtime* runtime_new(const Config* cfg) {
         }
     }
     if (config_resolve_provider(&rt->config) != AGENT_OK) {
+        runtime_free(rt);
+        return NULL;
+    }
+    if (config_add_chatgpt_fallbacks(&rt->config) != AGENT_OK) {
         runtime_free(rt);
         return NULL;
     }
