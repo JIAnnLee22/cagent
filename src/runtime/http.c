@@ -117,6 +117,10 @@ static struct curl_slist* resolve_url_host(const char* url) {
     struct addrinfo hints = {0};
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_family = AF_UNSPEC;
+    /* Do not pin an address family that is not actually configured locally.
+     * Broken IPv6 routes are common on VPN/TUN networks and can otherwise
+     * make the first request spend the whole connect timeout on a dead path. */
+    hints.ai_flags = AI_ADDRCONFIG;
     struct addrinfo* addresses = NULL;
     if (getaddrinfo(host, port, &hints, &addresses) != 0) {
         curl_free(host);
@@ -466,6 +470,18 @@ static int http_request_start_method(HttpRuntime* h, const char* url, const char
     curl_easy_setopt(req->easy, CURLOPT_WRITEDATA, req);
     curl_easy_setopt(req->easy, CURLOPT_CONNECTTIMEOUT, 30L);
     curl_easy_setopt(req->easy, CURLOPT_TIMEOUT, 600L);
+    /* Treat a dead/stalled connection as a transient transport failure so
+     * the agent retry policy can recover instead of waiting indefinitely.
+     * SSE keep-alive comments count as received bytes and therefore do not
+     * trip this guard while the provider is maintaining a live stream. */
+    curl_easy_setopt(req->easy, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(req->easy, CURLOPT_LOW_SPEED_TIME, 120L);
+    curl_easy_setopt(req->easy, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(req->easy, CURLOPT_TCP_KEEPIDLE, 30L);
+    curl_easy_setopt(req->easy, CURLOPT_TCP_KEEPINTVL, 15L);
+#if LIBCURL_VERSION_NUM >= 0x073E00 /* CURLOPT_TCP_KEEPCNT since 7.62.0 */
+    curl_easy_setopt(req->easy, CURLOPT_TCP_KEEPCNT, 3L);
+#endif
     curl_easy_setopt(req->easy, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(req->easy, CURLOPT_USERAGENT, "cagent/0.1");
 

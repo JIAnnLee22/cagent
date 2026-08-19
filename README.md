@@ -51,7 +51,7 @@ ctest --test-dir build         # 27 个测试（Debug + ASan 双构建）
 
 配置优先级：CLI > 环境变量 > 配置文件 > 默认值。`auth.json` 等同密码，API key/refresh token 永不写入日志、TUI 或 Session，文件权限为 0600。启动时实时获取当前 provider、`models[]` 显式引用的 provider，以及已完成 OAuth 登录的 ChatGPT 模型目录；不会探测其他无关服务，也不持久化模型缓存。模型目录不可用时保留静态配置并记录告警；显式模型缺失时会告警后回退。
 
-连续 coding loop 的 `max_retries` 默认 2，仅在尚未产生任何文本/tool-call delta 时对 429、可重试 5xx 和传输错误做 250ms 起的非阻塞指数退避；重试进度会显示在状态栏，可在 `config.json` 覆盖。工具调用不再设置固定轮数上限，长任务由模型上下文窗口与自动 compaction 驱动。
+连续 coding loop 的 `max_retries` 默认 5，仅在尚未产生任何文本/tool-call delta 时对 429、可重试 5xx 和传输错误做 250ms 起、最高 8s 的非阻塞指数退避；HTTP 连接还启用了低速检测与 TCP keepalive，以便把断线/卡死交给同一重试策略恢复。重试进度会显示在状态栏，可在 `config.json` 覆盖。工具调用不再设置固定轮数上限，长任务由模型上下文窗口与自动 compaction 驱动。
 
 ### ChatGPT Plus / Codex OAuth
 

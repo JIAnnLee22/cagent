@@ -3,7 +3,7 @@
   "model": "deepseek-v4-flash",
   "max_tokens": 4096,
   "max_concurrent_agents": 16,
-  "max_retries": 2,
+  "max_retries": 5,
   "context_window": 128000,
   "project_memory_max_bytes": 4096,
   "input_price": 0.15,

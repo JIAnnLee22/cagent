@@ -815,9 +815,13 @@ static bool retry_delay_elapsed(const struct timespec* deadline) {
 }
 
 static void schedule_retry_delay(AgentLoopState* st) {
-    long delay_ms = 250L << (st->request_retries > 4 ? 4 : st->request_retries - 1);
-    if (delay_ms > 2000)
-        delay_ms = 2000;
+    /* Non-blocking exponential backoff: 250ms, 500ms, 1s, 2s, 4s,
+     * then 8s when a caller configures more than five retries. The larger
+     * final window is intentional: a transient DNS, Wi-Fi, VPN, or provider
+     * outage often lasts longer than the old two-retry budget. */
+    long delay_ms = 250L << (st->request_retries > 5 ? 5 : st->request_retries - 1);
+    if (delay_ms > 8000)
+        delay_ms = 8000;
     clock_gettime(CLOCK_MONOTONIC, &st->retry_at);
     st->retry_at.tv_sec += delay_ms / 1000;
     st->retry_at.tv_nsec += (delay_ms % 1000) * 1000000L;

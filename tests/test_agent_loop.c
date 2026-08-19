@@ -276,6 +276,9 @@ static int test_model_error(void) {
     if (a == NULL) {
         return g_failures;
     }
+    /* This test checks the terminal error path, not the transient retry
+     * budget. Disable retries so the failure remains fast and deterministic. */
+    a->runtime->config.max_retries = 0;
 
     int rc = agent_run(a, "hi");
     CHECK(rc != AGENT_OK);

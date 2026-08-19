@@ -104,7 +104,7 @@ Agent(轻量状态机, agent_start/agent_resume/agent_run)
 - Tool 增加只读 approval preview：write/edit 显示有界行级变更，bash 显示命令/cwd/超时/风险提示，git 写操作显示 staged 或目标摘要。
 - 交互式 `-p`/`--plain` 支持同步 y/N 审批；非 TTY/EOF 保持 fail-closed。
 - 新增 workspace 内 `list/find`；加载 Git 根到 cwd 的 AGENTS/CLAUDE 指令与根 PROGRESS.md，并修复 OpenAI Chat 丢弃 system_prompt；子代理继承项目规则。
-- OpenAI/Anthropic 对 2xx 干净 EOF 缺终止事件返回明确错误；Anthropic 兼容 `[DONE]`；零 delta 瞬时错误默认以非阻塞指数退避重试 2 次并显示状态；早期版本曾设置单用户回合 24 个工具轮次，现已改为上下文驱动。
+- OpenAI/Anthropic 对 2xx 干净 EOF 缺终止事件返回明确错误；Anthropic 兼容 `[DONE]`；零 delta 瞬时错误默认以非阻塞指数退避重试 5 次并显示状态；早期版本曾设置单用户回合 24 个工具轮次，现已改为上下文驱动。
 - 模型发现只探测当前及显式配置 provider，等待上限从 35 秒降至 8 秒；目录缺少显式模型时先告警再回退，并正确归一化 TUI 持久化的 `provider/model` 选择器。
 - TUI 顶栏与 `/session` 暴露恢复命令；`-p`/`--plain` 的同步驱动检查 SIGINT，取消只终止当前回合，后续可在同一 session 继续。
 ## 历史进展：长阻塞工具异步化（2026-08-14）

@@ -56,7 +56,7 @@ typedef struct {
     double output_price; /* USD per 1M output tokens; 0 = unknown */
     bool subscription;   /* flat-plan model: footer shows (sub) not $ */
     int64_t max_concurrent_agents; /* scheduler limit; 0 -> default 16 */
-    int64_t max_retries;           /* transient model request retries; default 2 */
+    int64_t max_retries;           /* transient model request retries; default 5 */
     ModelConfig* models;           /* owned; extra named models; may be NULL */
     size_t n_models;
 } Config;

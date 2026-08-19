@@ -23,6 +23,10 @@
 static char g_tmpdir[256];
 
 static int test_config_models_parsing(void) {
+    Config defaults = config_default();
+    CHECK(defaults.max_retries == 5);
+    config_free(&defaults);
+
     char path[600];
     snprintf(path, sizeof(path), "%s/config.json", g_tmpdir);
     FILE* f = fopen(path, "w");

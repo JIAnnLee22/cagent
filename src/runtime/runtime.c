@@ -41,7 +41,10 @@
 #define DEFAULT_MAX_TOKENS 4096
 #define DEFAULT_CONTEXT_WINDOW 128000
 #define DEFAULT_MAX_OUTPUT 8192
-#define DEFAULT_MAX_RETRIES 2
+/* Transient network failures are common on mobile/VPN/TUN links. Keep the
+ * retry budget large enough to bridge a short outage without making
+ * permanent failures feel hung. */
+#define DEFAULT_MAX_RETRIES 5
 #define DEFAULT_PROJECT_MEMORY_MAX_BYTES (4 * 1024)
 
 static bool legacy_auth_is_chatgpt(const char* auth) {
