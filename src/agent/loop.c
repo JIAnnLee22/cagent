@@ -18,6 +18,8 @@
 #include <string.h>
 #include <time.h>
 
+#include <openssl/sha.h>
+
 #include "agent/agent.h"
 #include "agent/context.h"
 #include "agent/message.h"
@@ -72,6 +74,8 @@ typedef struct {
     bool approval_decided;
     bool approval_granted;
     size_t approval_tool_index;
+    unsigned char approval_digest[SHA256_DIGEST_LENGTH];
+    bool approval_digest_valid;
     size_t request_retries; /* retries for the current logical model request */
     bool retry_pending;     /* waiting for non-blocking retry backoff */
     struct timespec retry_at;
@@ -94,6 +98,28 @@ typedef struct {
      * current model request is in flight. */
     String memory_injection;
 } AgentLoopState;
+
+static void approval_digest(const ToolCall* tc,
+                            unsigned char out[SHA256_DIGEST_LENGTH]) {
+    SHA256_CTX ctx;
+    SHA256_Init(&ctx);
+    if (tc != NULL && tc->name != NULL) {
+        SHA256_Update(&ctx, tc->name, strlen(tc->name) + 1);
+    }
+    if (tc != NULL && tc->arguments != NULL) {
+        SHA256_Update(&ctx, tc->arguments, strlen(tc->arguments) + 1);
+    }
+    SHA256_Final(out, &ctx);
+}
+
+static bool approval_matches(const AgentLoopState* st, const ToolCall* tc) {
+    if (st == NULL || tc == NULL || !st->approval_digest_valid) {
+        return false;
+    }
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    approval_digest(tc, digest);
+    return memcmp(st->approval_digest, digest, sizeof(digest)) == 0;
+}
 
 static AgentLoopState* loop_state(Agent* a) {
     if (a->loop_state == NULL) {
@@ -1118,8 +1144,13 @@ AgentStepResult agent_resume(Agent* a) {
             }
             Message* assistant = &a->messages.items[st->tool_message_index];
             ToolCall* tc = &assistant->tool_calls.items[st->tool_index];
-            if (!st->approval_granted) {
-                int rc = append_tool_rejection(a, tc, "error: tool execution denied by user");
+            bool approval_stale = st->approval_granted &&
+                                  (st->tool_index != st->approval_tool_index ||
+                                   !approval_matches(st, tc));
+            if (!st->approval_granted || approval_stale) {
+                int rc = append_tool_rejection(
+                    a, tc, approval_stale ? "error: approval is stale; tool call changed"
+                                          : "error: tool execution denied by user");
                 if (rc != AGENT_OK) {
                     a->state = AGENT_ERROR;
                     st->in_turn = false;
@@ -1137,11 +1168,13 @@ AgentStepResult agent_resume(Agent* a) {
                 st->approval_pending = false;
                 st->approval_decided = false;
                 st->approval_granted = false;
+                st->approval_digest_valid = false;
                 a->state = AGENT_WAIT_TOOL;
                 continue;
             }
             st->approval_pending = false;
             st->approval_decided = false;
+            st->approval_digest_valid = false;
             a->state = AGENT_WAIT_TOOL;
             continue;
         }
@@ -1215,6 +1248,8 @@ AgentStepResult agent_resume(Agent* a) {
                                 st->approval_pending = true;
                                 st->approval_decided = false;
                                 st->approval_tool_index = st->tool_index;
+                                approval_digest(tc, st->approval_digest);
+                                st->approval_digest_valid = true;
                                 a->state = AGENT_WAIT_USER;
                                 char* preview = build_tool_preview(a, tool, tc);
                                 AgentEvent ev = {.type = AGENT_EVT_TOOL_APPROVAL,
