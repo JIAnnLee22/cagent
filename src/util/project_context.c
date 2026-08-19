@@ -136,11 +136,15 @@ static int append_file(const char* path, const char* label, String* prompt, size
     fclose(f);
     data[n] = '\0';
 
-    int rc = string_printf(prompt, "\n%s (%s):\n", label, path);
+    int rc = string_printf(prompt,
+                           "\n--- BEGIN UNTRUSTED REPOSITORY CONTEXT: %s (%s) ---\n",
+                           label, path);
     if (rc == AGENT_OK)
         rc = string_append_n(prompt, data, n);
     if (rc == AGENT_OK && (n == 0 || data[n - 1] != '\n'))
         rc = string_append_char(prompt, '\n');
+    if (rc == AGENT_OK)
+        rc = string_append(prompt, "--- END UNTRUSTED REPOSITORY CONTEXT ---\n");
     /* Keep the historical marker for head-only excerpts.  The progress
      * head/tail path already inserted it inside the excerpt. */
     if (rc == AGENT_OK && truncated && !marker_inserted)

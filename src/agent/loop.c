@@ -18,7 +18,7 @@
 #include <string.h>
 #include <time.h>
 
-#include <openssl/sha.h>
+#include <openssl/evp.h>
 
 #include "agent/agent.h"
 #include "agent/context.h"
@@ -74,7 +74,7 @@ typedef struct {
     bool approval_decided;
     bool approval_granted;
     size_t approval_tool_index;
-    unsigned char approval_digest[SHA256_DIGEST_LENGTH];
+    unsigned char approval_digest[EVP_MAX_MD_SIZE];
     bool approval_digest_valid;
     size_t request_retries; /* retries for the current logical model request */
     bool retry_pending;     /* waiting for non-blocking retry backoff */
@@ -99,26 +99,33 @@ typedef struct {
     String memory_injection;
 } AgentLoopState;
 
-static void approval_digest(const ToolCall* tc,
-                            unsigned char out[SHA256_DIGEST_LENGTH]) {
-    SHA256_CTX ctx;
-    SHA256_Init(&ctx);
-    if (tc != NULL && tc->name != NULL) {
-        SHA256_Update(&ctx, tc->name, strlen(tc->name) + 1);
+static bool approval_digest(const ToolCall* tc, unsigned char out[EVP_MAX_MD_SIZE]) {
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (ctx == NULL) {
+        return false;
     }
-    if (tc != NULL && tc->arguments != NULL) {
-        SHA256_Update(&ctx, tc->arguments, strlen(tc->arguments) + 1);
+    bool ok = EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) == 1;
+    if (ok && tc != NULL && tc->name != NULL) {
+        ok = EVP_DigestUpdate(ctx, tc->name, strlen(tc->name) + 1) == 1;
     }
-    SHA256_Final(out, &ctx);
+    if (ok && tc != NULL && tc->arguments != NULL) {
+        ok = EVP_DigestUpdate(ctx, tc->arguments, strlen(tc->arguments) + 1) == 1;
+    }
+    unsigned int digest_len = 0;
+    if (ok) {
+        ok = EVP_DigestFinal_ex(ctx, out, &digest_len) == 1 && digest_len == 32;
+    }
+    EVP_MD_CTX_free(ctx);
+    return ok;
 }
 
 static bool approval_matches(const AgentLoopState* st, const ToolCall* tc) {
     if (st == NULL || tc == NULL || !st->approval_digest_valid) {
         return false;
     }
-    unsigned char digest[SHA256_DIGEST_LENGTH];
-    approval_digest(tc, digest);
-    return memcmp(st->approval_digest, digest, sizeof(digest)) == 0;
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    return approval_digest(tc, digest) &&
+           memcmp(st->approval_digest, digest, 32) == 0;
 }
 
 static AgentLoopState* loop_state(Agent* a) {
@@ -718,8 +725,9 @@ static const char* build_turn_system_prompt(Agent* a, AgentLoopState* st) {
             mem_len = AGENT_MEMORY_INJECTION_MAX;
         }
         string_append(&st->memory_injection,
-                      "\n\nSession memory (current session; verify against files):\n");
+                      "\n\n--- BEGIN UNTRUSTED SESSION MEMORY (Session memory; verify against files) ---\n");
         string_append_n(&st->memory_injection, mem, mem_len);
+        string_append(&st->memory_injection, "\n--- END UNTRUSTED SESSION MEMORY ---\n");
         if (truncated) {
             string_append(&st->memory_injection, "\n[memory truncated]");
         }
@@ -1248,8 +1256,8 @@ AgentStepResult agent_resume(Agent* a) {
                                 st->approval_pending = true;
                                 st->approval_decided = false;
                                 st->approval_tool_index = st->tool_index;
-                                approval_digest(tc, st->approval_digest);
-                                st->approval_digest_valid = true;
+                                st->approval_digest_valid =
+                                    approval_digest(tc, st->approval_digest);
                                 a->state = AGENT_WAIT_USER;
                                 char* preview = build_tool_preview(a, tool, tc);
                                 AgentEvent ev = {.type = AGENT_EVT_TOOL_APPROVAL,
