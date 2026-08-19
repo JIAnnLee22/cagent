@@ -500,6 +500,13 @@ static int test_git_checkpoint_tools(void) {
     CHECK(git_checkpoint_available(repo));
     free(r.content);
 
+    r = (ToolResult){0};
+    run_preview(&git_restore_checkpoint_tool, "{}", &r);
+    CHECK(!r.is_error);
+    CHECK(strstr(r.content, "git reset --hard") != NULL);
+    CHECK(strstr(r.content, "Current working tree") != NULL);
+    free(r.content);
+
     FILE* f;
     char tracked[sizeof(repo) + 32];
     snprintf(tracked, sizeof(tracked), "%s/tracked.txt", repo);
@@ -509,7 +516,12 @@ static int test_git_checkpoint_tools(void) {
         fputs("broken", f);
         fclose(f);
     }
-    r.content = NULL;
+    r = (ToolResult){0};
+    run_preview(&git_restore_checkpoint_tool, "{}", &r);
+    CHECK(!r.is_error);
+    CHECK(strstr(r.content, "tracked.txt") != NULL);
+    free(r.content);
+    r = (ToolResult){0};
     run_tool(&git_restore_checkpoint_tool, "{}", &r);
     CHECK(!r.is_error);
     free(r.content);

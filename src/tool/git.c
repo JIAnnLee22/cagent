@@ -267,6 +267,23 @@ static int git_restore_checkpoint_execute(ToolContext* ctx, const char* argument
         result->is_error = true;
         return result->content != NULL ? AGENT_OK : AGENT_ERR_OOM;
     }
+    char* current_argv[] = {(char*)"/usr/bin/git", (char*)"rev-parse", (char*)"HEAD", NULL};
+    ProcessResult current = {0};
+    rc = process_run(ctx != NULL ? ctx->cwd : NULL, current_argv, GIT_TIMEOUT_MS,
+                     GIT_OUTPUT_CAP, &current);
+    while (rc == AGENT_OK && current.out.len > 0 &&
+           (current.out.data[current.out.len - 1] == '\n' ||
+            current.out.data[current.out.len - 1] == '\r')) {
+        current.out.data[--current.out.len] = '\0';
+    }
+    bool same_head = rc == AGENT_OK && current.exit_code == 0 &&
+                     strcmp(current.out.data != NULL ? current.out.data : "", head) == 0;
+    process_result_free(&current);
+    if (!same_head) {
+        result->content = strdup("error: checkpoint HEAD differs from current HEAD; refusing reset");
+        result->is_error = true;
+        return result->content != NULL ? AGENT_OK : AGENT_ERR_OOM;
+    }
     char* argv[] = {(char*)"/usr/bin/git", (char*)"reset", (char*)"--hard", head, NULL};
     rc = git_result(ctx != NULL ? ctx->cwd : NULL, argv, result);
     if (rc == AGENT_OK && !result->is_error) {
@@ -391,12 +408,50 @@ static bool valid_target(const char* target) {
 
 static int git_restore_checkpoint_preview(ToolContext* ctx, const char* arguments,
                                           ToolResult* result) {
-    (void)ctx;
     (void)arguments;
-    result->content = strdup("git reset --hard to the saved clean-worktree checkpoint\n"
-                             "Tracked changes will be discarded; untracked files remain.");
+    result->content = NULL;
     result->is_error = false;
-    return result->content != NULL ? AGENT_OK : AGENT_ERR_OOM;
+    char path[PATH_MAX];
+    char head[64] = {0};
+    int rc = checkpoint_path(ctx, path, sizeof(path));
+    if (rc == AGENT_OK) {
+        FILE* f = fopen(path, "r");
+        if (f == NULL || fgets(head, sizeof(head), f) == NULL) {
+            rc = AGENT_ERR_IO;
+        }
+        if (f != NULL)
+            fclose(f);
+    }
+    size_t len = strlen(head);
+    while (len > 0 && (head[len - 1] == '\n' || head[len - 1] == '\r'))
+        head[--len] = '\0';
+    if (rc != AGENT_OK || !valid_commit_hash(head)) {
+        result->content = strdup("error: no valid clean-worktree checkpoint exists");
+        result->is_error = true;
+        return result->content != NULL ? AGENT_OK : AGENT_ERR_OOM;
+    }
+
+    char* argv[] = {(char*)"/usr/bin/git", (char*)"status", (char*)"--short", NULL};
+    ProcessResult status = {0};
+    rc = process_run(ctx != NULL ? ctx->cwd : NULL, argv, GIT_PREVIEW_TIMEOUT_MS,
+                     GIT_PREVIEW_OUTPUT_CAP, &status);
+    if (rc != AGENT_OK || status.exit_code != 0) {
+        process_result_free(&status);
+        result->content = strdup("error: cannot inspect working tree before reset");
+        result->is_error = true;
+        return result->content != NULL ? AGENT_OK : AGENT_ERR_OOM;
+    }
+    String out = string_new();
+    string_printf(&out, "git reset --hard %s\nCurrent working tree (will be discarded):\n",
+                  head);
+    if (status.out.len == 0)
+        string_append(&out, "(clean)\n");
+    else
+        string_append_n(&out, status.out.data, status.out.len);
+    string_append(&out, "Tracked changes will be discarded; untracked files remain.\n");
+    result->content = string_take(&out);
+    process_result_free(&status);
+    return AGENT_OK;
 }
 
 static int git_commit_preview(ToolContext* ctx, const char* arguments, ToolResult* result) {
