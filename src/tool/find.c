@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "tool/path_policy.h"
 #include "tool/tool.h"
 #include "util/json.h"
 #include "util/string.h"
@@ -27,27 +28,6 @@ typedef struct {
     bool glob;
     bool truncated;
 } FindState;
-
-static bool safe_relative(const char* path) {
-    if (path == NULL || path[0] == '\0' || path[0] == '/')
-        return false;
-    for (const char* p = path; *p != '\0';) {
-        while (*p == '/')
-            p++;
-        const char* start = p;
-        while (*p != '\0' && *p != '/')
-            p++;
-        if ((size_t)(p - start) == 2 && start[0] == '.' && start[1] == '.')
-            return false;
-    }
-    return true;
-}
-
-static bool inside_root(const char* root, const char* path) {
-    size_t n = strlen(root);
-    return strcmp(root, "/") == 0 ||
-           (strncmp(root, path, n) == 0 && (path[n] == '\0' || path[n] == '/'));
-}
 
 static bool skip_recurse(const char* name) {
     static const char* skipped[] = {".git", "node_modules", "build", "build-asan", "build-bench",
@@ -147,12 +127,6 @@ static int find_execute(ToolContext* ctx, const char* arguments, ToolResult* res
         json_doc_free(doc);
         return AGENT_OK;
     }
-    if (!safe_relative(path)) {
-        result->content = strdup("error: path must stay inside the workspace");
-        result->is_error = true;
-        json_doc_free(doc);
-        return AGENT_OK;
-    }
     int64_t depth = json_obj_get_int(obj, "max_depth", 8);
     int64_t max_results = json_obj_get_int(obj, "max_results", FIND_DEFAULT_MAX);
     if (depth < 1)
@@ -164,11 +138,8 @@ static int find_execute(ToolContext* ctx, const char* arguments, ToolResult* res
     if (max_results > FIND_MAX_RESULTS)
         max_results = FIND_MAX_RESULTS;
 
-    const char* cwd = ctx != NULL && ctx->cwd != NULL ? ctx->cwd : ".";
-    char workspace[PATH_MAX], input[PATH_MAX], target[PATH_MAX];
-    if (realpath(cwd, workspace) == NULL ||
-        snprintf(input, sizeof(input), "%s/%s", workspace, path) >= (int)sizeof(input) ||
-        realpath(input, target) == NULL || !inside_root(workspace, target)) {
+    char target[PATH_MAX];
+    if (tool_path_resolve(ctx, path, false, target, sizeof(target)) != AGENT_OK) {
         result->content = strdup("error: cannot search path or path leaves the workspace");
         result->is_error = true;
         json_doc_free(doc);

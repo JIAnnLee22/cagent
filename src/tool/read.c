@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tool/path_policy.h"
 #include "tool/tool.h"
 #include "util/json.h"
 #include "util/string.h"
@@ -29,17 +30,6 @@
 #define READ_DEFAULT_LIMIT 200
 #define READ_MAX_LIMIT 2000
 #define READ_LINE_MAX 65536
-
-static int resolve_path(const char* cwd, const char* path, char* out, size_t out_size) {
-    if (path[0] == '/') {
-        snprintf(out, out_size, "%s", path);
-    } else if (cwd != NULL) {
-        snprintf(out, out_size, "%s/%s", cwd, path);
-    } else {
-        snprintf(out, out_size, "%s", path);
-    }
-    return out[0] == '\0' ? AGENT_ERR_TOOL : AGENT_OK;
-}
 
 static int check_binary(FILE* f) {
     char buf[READ_BINARY_SCAN];
@@ -86,9 +76,9 @@ static int read_execute(ToolContext* ctx, const char* arguments, ToolResult* res
      * function). */
 
     char full[PATH_MAX];
-    if (resolve_path(ctx->cwd, path, full, sizeof(full)) != AGENT_OK) {
+    if (tool_path_resolve(ctx, path, true, full, sizeof(full)) != AGENT_OK) {
         json_doc_free(doc);
-        result->content = strdup("error: invalid path");
+        result->content = strdup("error: path must stay inside the workspace");
         result->is_error = true;
         return AGENT_OK;
     }

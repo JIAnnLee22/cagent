@@ -69,6 +69,49 @@ static int test_grep_missing_pattern(void) {
     return g_failures;
 }
 
+static int test_grep_workspace_path_policy(void) {
+    char outside[512];
+    char link_path[512];
+    snprintf(outside, sizeof(outside), "/tmp/cagent-grep-outside-%ld.txt", (long)getpid());
+    snprintf(link_path, sizeof(link_path), "%s/escape.txt", g_tmpdir);
+
+    FILE* f = fopen(outside, "w");
+    CHECK(f != NULL);
+    if (f != NULL) {
+        fputs("outside secret\n", f);
+        fclose(f);
+    }
+    CHECK(symlink(outside, link_path) == 0);
+
+    ToolContext ctx = {0};
+    ctx.cwd = g_tmpdir;
+    ToolResult r = {0};
+    CHECK(grep_tool.execute(&ctx, "{\"pattern\":\"outside\",\"path\":\"/tmp\"}", &r) ==
+          AGENT_OK);
+    CHECK(r.is_error);
+    CHECK(strstr(r.content, "workspace") != NULL);
+    free(r.content);
+
+    r = (ToolResult){0};
+    CHECK(grep_tool.execute(&ctx,
+                            "{\"pattern\":\"outside\",\"path\":\"../cagent-grep-outside-placeholder.txt\"}",
+                            &r) == AGENT_OK);
+    CHECK(r.is_error);
+    CHECK(strstr(r.content, "workspace") != NULL);
+    free(r.content);
+
+    r = (ToolResult){0};
+    CHECK(grep_tool.execute(&ctx, "{\"pattern\":\"outside\",\"path\":\"escape.txt\"}", &r) ==
+          AGENT_OK);
+    CHECK(r.is_error);
+    CHECK(strstr(r.content, "workspace") != NULL);
+    free(r.content);
+
+    unlink(link_path);
+    unlink(outside);
+    return g_failures;
+}
+
 static int test_grep_max_results(void) {
     /* many matching lines, max_results small */
     char path[600];
@@ -111,6 +154,7 @@ int main(void) {
     g_failures += test_grep_finds_matches();
     g_failures += test_grep_no_matches();
     g_failures += test_grep_missing_pattern();
+    g_failures += test_grep_workspace_path_policy();
     g_failures += test_grep_max_results();
 
     char cmd[512];

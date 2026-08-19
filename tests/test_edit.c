@@ -136,6 +136,57 @@ static int test_edit_nonexistent_file(void) {
     return g_failures;
 }
 
+static int test_edit_workspace_path_policy(void) {
+    char outside[512];
+    char link_path[512];
+    snprintf(outside, sizeof(outside), "/tmp/cagent-edit-outside-%ld.txt", (long)getpid());
+    snprintf(link_path, sizeof(link_path), "%s/escape.txt", g_tmpdir);
+
+    FILE* f = fopen(outside, "w");
+    CHECK(f != NULL);
+    if (f != NULL) {
+        fputs("outside\n", f);
+        fclose(f);
+    }
+    CHECK(symlink(outside, link_path) == 0);
+
+    char args[1024];
+    ToolResult r = {0};
+    snprintf(args, sizeof(args), "{\"path\":\"%s\",\"old_text\":\"outside\","
+             "\"new_text\":\"changed\"}", outside);
+    run_edit(args, &r);
+    CHECK(r.is_error);
+    CHECK(strstr(r.content, "workspace") != NULL);
+    free(r.content);
+
+    r = (ToolResult){0};
+    run_edit("{\"path\":\"../cagent-edit-outside-placeholder\",\"old_text\":\"outside\","
+             "\"new_text\":\"changed\"}", &r);
+    CHECK(r.is_error);
+    CHECK(strstr(r.content, "workspace") != NULL);
+    free(r.content);
+
+    ToolContext ctx = make_ctx();
+    ToolResult preview = {0};
+    CHECK(edit_tool.preview(&ctx,
+                            "{\"path\":\"escape.txt\",\"old_text\":\"outside\","
+                            "\"new_text\":\"changed\"}",
+                            &preview) == AGENT_OK);
+    CHECK(preview.content != NULL && preview.is_error);
+    CHECK(strstr(preview.content, "workspace") != NULL);
+    free(preview.content);
+
+    r = (ToolResult){0};
+    run_edit("{\"path\":\"escape.txt\",\"old_text\":\"outside\",\"new_text\":\"changed\"}", &r);
+    CHECK(r.is_error);
+    CHECK(strstr(r.content, "workspace") != NULL);
+    free(r.content);
+
+    unlink(link_path);
+    unlink(outside);
+    return g_failures;
+}
+
 static int test_edit_empty_old_text(void) {
     ToolResult r = {0};
     run_edit("{\"path\":\"a.c\",\"old_text\":\"\",\"new_text\":\"y\"}", &r);
@@ -164,6 +215,7 @@ int main(void) {
     g_failures += test_edit_no_match();
     g_failures += test_edit_multiple_matches();
     g_failures += test_edit_nonexistent_file();
+    g_failures += test_edit_workspace_path_policy();
     g_failures += test_edit_empty_old_text();
     g_failures += test_edit_bad_json();
 

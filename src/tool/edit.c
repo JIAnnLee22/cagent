@@ -22,23 +22,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "tool/path_policy.h"
 #include "tool/tool.h"
 #include "util/diff.h"
 #include "util/json.h"
 #include "util/string.h"
 
 #define EDIT_MAX_FILE (8 * 1024 * 1024)
-
-static int resolve_path(const char* cwd, const char* path, char* out, size_t out_size) {
-    if (path[0] == '/') {
-        snprintf(out, out_size, "%s", path);
-    } else if (cwd != NULL) {
-        snprintf(out, out_size, "%s/%s", cwd, path);
-    } else {
-        snprintf(out, out_size, "%s", path);
-    }
-    return out[0] == '\0' ? AGENT_ERR_TOOL : AGENT_OK;
-}
 
 static int edit_preview(ToolContext* ctx, const char* arguments, ToolResult* result) {
     result->content = NULL;
@@ -60,8 +50,8 @@ static int edit_preview(ToolContext* ctx, const char* arguments, ToolResult* res
         return AGENT_OK;
     }
     char full[PATH_MAX];
-    if (resolve_path(ctx != NULL ? ctx->cwd : NULL, path, full, sizeof(full)) != AGENT_OK) {
-        result->content = strdup("error: invalid path");
+    if (tool_path_resolve(ctx, path, true, full, sizeof(full)) != AGENT_OK) {
+        result->content = strdup("error: path must stay inside the workspace");
         result->is_error = true;
         json_doc_free(doc);
         return AGENT_OK;
@@ -156,9 +146,9 @@ static int edit_execute(ToolContext* ctx, const char* arguments, ToolResult* res
     /* path/old_text/new_text are borrowed from the document; keep it alive */
 
     char full[PATH_MAX];
-    if (resolve_path(ctx->cwd, path, full, sizeof(full)) != AGENT_OK) {
+    if (tool_path_resolve(ctx, path, true, full, sizeof(full)) != AGENT_OK) {
         json_doc_free(doc);
-        result->content = strdup("error: invalid path");
+        result->content = strdup("error: path must stay inside the workspace");
         result->is_error = true;
         return AGENT_OK;
     }

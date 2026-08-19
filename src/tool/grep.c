@@ -21,6 +21,7 @@
 
 #include "runtime/process.h"
 #include "runtime/runtime.h"
+#include "tool/path_policy.h"
 #include "tool/tool.h"
 #include "util/json.h"
 #include "util/string.h"
@@ -102,6 +103,13 @@ static int grep_execute(ToolContext* ctx, const char* arguments, ToolResult* res
     if (path == NULL || path[0] == '\0') {
         path = ".";
     }
+    char safe_path[PATH_MAX];
+    if (tool_path_resolve(ctx, path, false, safe_path, sizeof(safe_path)) != AGENT_OK) {
+        result->content = strdup("error: path must stay inside the workspace");
+        result->is_error = true;
+        json_doc_free(doc);
+        return AGENT_OK;
+    }
     int64_t max_results = json_obj_get_int(root, "max_results", GREP_DEFAULT_MAX);
     if (max_results < 1) {
         max_results = 1;
@@ -119,7 +127,7 @@ static int grep_execute(ToolContext* ctx, const char* arguments, ToolResult* res
     int rc;
 
     if (rg != NULL) {
-        char* argv[] = {rg, "--no-heading", "-n", "-m", max_str, (char*)pattern, (char*)path, NULL};
+        char* argv[] = {rg, "--no-heading", "-n", "-m", max_str, (char*)pattern, safe_path, NULL};
         rc = process_run(ctx->cwd, argv, 30000, GREP_OUTPUT_CAP, &pr);
         if (rc == AGENT_OK && !pr.timed_out && (pr.exit_code == 0 || pr.exit_code == 1)) {
             /* rg exit 1 = no matches, still a valid result */
@@ -143,7 +151,7 @@ static int grep_execute(ToolContext* ctx, const char* arguments, ToolResult* res
         return AGENT_OK;
     }
     /* grep -rn <pattern> <path>; -m limits matches per file */
-    char* argv[] = {grep_path, "-rn", "-m", max_str, (char*)pattern, (char*)path, NULL};
+    char* argv[] = {grep_path, "-rn", "-m", max_str, (char*)pattern, safe_path, NULL};
     rc = process_run(ctx->cwd, argv, 30000, GREP_OUTPUT_CAP, &pr);
     free(grep_path);
     if (rc != AGENT_OK) {
@@ -294,6 +302,13 @@ static int grep_start(ToolContext* ctx, const char* arguments, ToolResult* resul
     if (path == NULL || path[0] == '\0') {
         path = ".";
     }
+    char safe_path[PATH_MAX];
+    if (tool_path_resolve(ctx, path, false, safe_path, sizeof(safe_path)) != AGENT_OK) {
+        result->content = strdup("error: path must stay inside the workspace");
+        result->is_error = true;
+        json_doc_free(doc);
+        return AGENT_OK;
+    }
     int64_t max_results = json_obj_get_int(root, "max_results", GREP_DEFAULT_MAX);
     if (max_results < 1) {
         max_results = 1;
@@ -313,7 +328,7 @@ static int grep_start(ToolContext* ctx, const char* arguments, ToolResult* resul
     task->loop = ctx->runtime->loop;
     task->cwd = ctx->cwd != NULL ? strdup(ctx->cwd) : NULL;
     task->pattern = strdup(pattern);
-    task->path = strdup(path);
+    task->path = strdup(safe_path);
     snprintf(task->max_results, sizeof(task->max_results), "%lld", (long long)max_results);
     json_doc_free(doc);
     if (task->pattern == NULL || task->path == NULL || (ctx->cwd != NULL && task->cwd == NULL)) {

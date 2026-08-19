@@ -20,6 +20,7 @@
 
 extern Tool read_tool;
 extern Tool write_tool;
+extern Tool edit_tool;
 extern Tool bash_tool;
 extern Tool bench_tool;
 extern Tool git_checkpoint_tool;
@@ -120,6 +121,67 @@ static int test_read_binary(void) {
     CHECK(r.is_error);
     CHECK(strstr(r.content, "binary") != NULL);
     free(r.content);
+    return g_failures;
+}
+
+static int test_workspace_path_policy(void) {
+    char outside[512];
+    char outside_relative[512];
+    char link_path[512];
+    snprintf(outside, sizeof(outside), "/tmp/cagent-tools-outside-%ld.txt", (long)getpid());
+    snprintf(outside_relative, sizeof(outside_relative), "../cagent-tools-outside-%ld.txt",
+             (long)getpid());
+    snprintf(link_path, sizeof(link_path), "%s/escape.txt", g_tmpdir);
+
+    FILE* f = fopen(outside, "w");
+    CHECK(f != NULL);
+    if (f != NULL) {
+        fputs("outside\n", f);
+        fclose(f);
+    }
+    CHECK(symlink(outside, link_path) == 0);
+
+    ToolResult r = {0};
+    char args[1024];
+    snprintf(args, sizeof(args), "{\"path\":\"%s\"}", outside);
+    run_tool(&read_tool, args, &r);
+    CHECK(r.is_error);
+    CHECK(strstr(r.content, "workspace") != NULL);
+    free(r.content);
+
+    r = (ToolResult){0};
+    snprintf(args, sizeof(args), "{\"path\":\"%s\"}", outside_relative);
+    run_tool(&read_tool, args, &r);
+    CHECK(r.is_error);
+    CHECK(strstr(r.content, "workspace") != NULL);
+    free(r.content);
+
+    r = (ToolResult){0};
+    run_tool(&read_tool, "{\"path\":\"escape.txt\"}", &r);
+    CHECK(r.is_error);
+    CHECK(strstr(r.content, "workspace") != NULL);
+    free(r.content);
+
+    r = (ToolResult){0};
+    snprintf(args, sizeof(args), "{\"path\":\"%s\",\"content\":\"changed\"}", outside);
+    run_tool(&write_tool, args, &r);
+    CHECK(r.is_error);
+    free(r.content);
+
+    r = (ToolResult){0};
+    run_tool(&write_tool, "{\"path\":\"escape.txt\",\"content\":\"changed\"}", &r);
+    CHECK(r.is_error);
+    free(r.content);
+
+    r = (ToolResult){0};
+    run_tool(&edit_tool,
+             "{\"path\":\"escape.txt\",\"old_text\":\"outside\",\"new_text\":\"changed\"}",
+             &r);
+    CHECK(r.is_error);
+    free(r.content);
+
+    unlink(link_path);
+    unlink(outside);
     return g_failures;
 }
 
@@ -571,6 +633,7 @@ int main(void) {
     g_failures += test_read_nonexistent();
     g_failures += test_read_line_numbers_and_offset();
     g_failures += test_read_binary();
+    g_failures += test_workspace_path_policy();
     g_failures += test_write_create_and_overwrite();
     g_failures += test_approval_previews();
     g_failures += test_navigation_tools();

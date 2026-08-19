@@ -97,6 +97,7 @@ add_library(cagent_core STATIC
   src/tool/list.c
   src/tool/memory.c
   src/tool/plan.c
+  src/tool/path_policy.c
   src/tool/builtin.c
   src/tool/read.c
   src/tool/registry.c
