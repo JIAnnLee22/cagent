@@ -19,6 +19,46 @@
 
 #define PROCESS_KILL_GRACE_MS 2000
 
+extern char** environ;
+
+static bool child_env_allowed(const char* entry) {
+    const char* equals = strchr(entry, '=');
+    size_t name_len = equals != NULL ? (size_t)(equals - entry) : strlen(entry);
+    static const char* exact[] = {"PATH", "HOME", "USER", "LOGNAME", "SHELL",
+                                  "TMPDIR", "TZ", "TERM", "COLORTERM", "PWD"};
+    for (size_t i = 0; i < sizeof(exact) / sizeof(exact[0]); i++) {
+        if (strlen(exact[i]) == name_len && strncmp(entry, exact[i], name_len) == 0) {
+            return true;
+        }
+    }
+    return (name_len >= 4 && strncmp(entry, "LANG", 4) == 0) ||
+           (name_len >= 3 && strncmp(entry, "LC_", 3) == 0);
+}
+
+static char** build_child_env(void) {
+    size_t count = 0;
+    if (environ != NULL) {
+        for (char** p = environ; *p != NULL; p++) {
+            if (child_env_allowed(*p)) {
+                count++;
+            }
+        }
+    }
+    char** env = calloc(count + 1, sizeof(*env));
+    if (env == NULL) {
+        return NULL;
+    }
+    size_t i = 0;
+    if (environ != NULL) {
+        for (char** p = environ; *p != NULL; p++) {
+            if (child_env_allowed(*p)) {
+                env[i++] = *p;
+            }
+        }
+    }
+    return env;
+}
+
 struct ProcessTask {
     EventLoop* loop; /* borrowed */
     pid_t pid;
@@ -195,8 +235,14 @@ int process_start(EventLoop* loop, const char* cwd, char* const argv[], int64_t 
     }
     *task_out = NULL;
 
+    char** child_env = build_child_env();
+    if (child_env == NULL) {
+        return AGENT_ERR_OOM;
+    }
+
     ProcessTask* task = calloc(1, sizeof(ProcessTask));
     if (task == NULL) {
+        free(child_env);
         return AGENT_ERR_OOM;
     }
     task->loop = loop;
@@ -221,6 +267,7 @@ int process_start(EventLoop* loop, const char* cwd, char* const argv[], int64_t 
             close(err_pipe[1]);
         }
         process_task_free(task);
+        free(child_env);
         return AGENT_ERR_PROCESS;
     }
 
@@ -236,13 +283,16 @@ int process_start(EventLoop* loop, const char* cwd, char* const argv[], int64_t 
         close(out_pipe[1]);
         close(err_pipe[0]);
         close(err_pipe[1]);
-        if (cwd != NULL) {
-            (void)chdir(cwd);
+        if (cwd != NULL && chdir(cwd) != 0) {
+            static const char message[] = "cagent: unable to enter working directory\n";
+            (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+            _exit(126);
         }
-        execv(argv[0], argv);
+        execve(argv[0], argv, child_env);
         _exit(127);
     }
 
+    free(child_env);
     close(out_pipe[1]);
     close(err_pipe[1]);
     if (pid < 0) {

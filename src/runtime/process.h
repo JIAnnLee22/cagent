@@ -8,8 +8,9 @@
  * grace period), cap captured output, and always reap the child.
  *
  * Ownership:
- *   - argv is borrowed; argv[0] must be a path to an executable (posix_spawn
- *     does no PATH lookup — resolve first).
+ *   - argv is borrowed; argv[0] must be a path to an executable (the
+ *     process layer does no PATH lookup — resolve first). Child processes
+ *     receive a restricted environment without credential-like variables.
  *   - result->out is owned by ProcessResult; process_result_free() frees it.
  */
 

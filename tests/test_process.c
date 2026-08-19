@@ -84,6 +84,20 @@ static int test_output_cap(void) {
     return g_failures;
 }
 
+static int test_child_environment_scrubbed(void) {
+    const char* secret = "cagent-test-secret-7f3c9a";
+    CHECK(setenv("CAGENT_TEST_SECRET", secret, 1) == 0);
+    char* argv[] = {(char*)"/bin/sh", (char*)"-c",
+                    (char*)"echo visible; printf '%s' \"$CAGENT_TEST_SECRET\"", NULL};
+    ProcessResult r = {0};
+    CHECK(process_run(NULL, argv, 5000, 0, &r) == AGENT_OK);
+    CHECK(r.out.data != NULL && strstr(r.out.data, "visible") != NULL);
+    CHECK(r.out.data == NULL || strstr(r.out.data, secret) == NULL);
+    process_result_free(&r);
+    CHECK(unsetenv("CAGENT_TEST_SECRET") == 0);
+    return g_failures;
+}
+
 static int test_cwd(void) {
     /* run in /tmp and check pwd output */
     char* argv[] = {(char*)"/bin/sh", (char*)"-c", (char*)"pwd", NULL};
@@ -98,6 +112,16 @@ static int64_t monotonic_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static int test_cwd_failure_is_reported(void) {
+    char* argv[] = {(char*)"/bin/sh", (char*)"-c", (char*)"pwd", NULL};
+    ProcessResult r = {0};
+    CHECK(process_run("/definitely/not/a/cagent-directory", argv, 5000, 0, &r) == AGENT_OK);
+    CHECK(r.exit_code != 0);
+    CHECK(r.out.data != NULL && strstr(r.out.data, "working directory") != NULL);
+    process_result_free(&r);
+    return g_failures;
 }
 
 static int test_timeout_kills_background_pipe_holder(void) {
@@ -187,7 +211,9 @@ int main(void) {
     g_failures += test_timeout_kills_tree();
     g_failures += test_timeout_kills_background_pipe_holder();
     g_failures += test_output_cap();
+    g_failures += test_child_environment_scrubbed();
     g_failures += test_cwd();
+    g_failures += test_cwd_failure_is_reported();
     g_failures += test_async_start_and_poll();
     g_failures += test_async_cancel();
 
