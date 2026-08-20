@@ -39,7 +39,10 @@
 #define DEFAULT_API_KEY_ENV "$OPENCODE_GO_API_KEY"
 #define DEFAULT_MODEL "glm-5.2"
 #define DEFAULT_MAX_TOKENS 4096
-#define DEFAULT_CONTEXT_WINDOW 128000
+/* All models fall back to a 1M-token window when neither the catalog, the
+ * config file nor a per-model entry pins a smaller value. 1M = 1000000
+ * tokens (the industry convention for marketing sizes like "1M context"). */
+#define DEFAULT_CONTEXT_WINDOW (1000 * 1000)
 #define DEFAULT_MAX_OUTPUT 8192
 /* Transient network failures are common on mobile/VPN/TUN links. Keep the
  * retry budget large enough to bridge a short outage without making
@@ -695,7 +698,7 @@ static void model_discovery_done(HttpRequest* req, const HttpDoneInfo* info, voi
          * some gateways use context_window/max_output_tokens (or put the
          * limits under `limit`).  Prefer the explicit cagent names, then
          * accept the standard aliases instead of silently falling back to
-         * the local 128k guess. */
+         * the local 1M guess. */
         entry->context_window = json_obj_get_int(item, "context_window", 0);
         if (entry->context_window <= 0)
             entry->context_window = json_obj_get_int(item, "contextWindow", 0);
@@ -714,7 +717,7 @@ static void model_discovery_done(HttpRequest* req, const HttpDoneInfo* info, voi
         if (entry->context_window <= 0 && discovery->config->provider != NULL &&
             strcmp(discovery->config->provider, "opencode-go") == 0 &&
             strcmp(name, "gpt-5.6-luna") == 0)
-            entry->context_window = 272000;
+            entry->context_window = DEFAULT_CONTEXT_WINDOW;
         entry->max_output = json_obj_get_int(item, "max_output_tokens", 0);
         if (entry->max_output <= 0)
             entry->max_output = json_obj_get_int(item, "max_output", 0);
@@ -1360,7 +1363,7 @@ static int config_add_chatgpt_fallbacks(Config* cfg) {
         fallback.provider = strdup("chatgpt");
         fallback.base_url = strdup(CHATGPT_CODEX_BASE_URL);
         fallback.protocol = strdup("responses");
-        fallback.context_window = 272000;
+        fallback.context_window = DEFAULT_CONTEXT_WINDOW;
         fallback.max_output = DEFAULT_MAX_OUTPUT;
         fallback.subscription = true;
         if (fallback.name == NULL || fallback.provider == NULL || fallback.base_url == NULL ||

@@ -353,7 +353,7 @@ static int test_live_chatgpt_model_discovery(void) {
     CHECK(cfg.models[3].context_window == 32768);
     CHECK(cfg.models[3].max_output == 2048);
     CHECK(strcmp(cfg.models[4].name, "gpt-5.6-luna") == 0);
-    CHECK(cfg.models[4].context_window == 272000);
+    CHECK(cfg.models[4].context_window == 1000000); /* provider fallback uses the 1M default */
     CHECK(strcmp(cfg.model_name, "api-model-two") == 0); /* selector normalized to API id */
     config_free(&cfg);
     test_server_stop(api_server);
@@ -632,7 +632,8 @@ static int test_catalog_refreshes_default_model(void) {
         return g_failures;
     }
     CHECK(rt->model != NULL);
-    int64_t before = rt->model->context_window; /* local default (128k) */
+    int64_t before = rt->model->context_window; /* local default (1M) */
+    CHECK(before == 1000000);
     CHECK(!rt->model->window_verified); /* no explicit config, no catalog yet */
 
     /* the live /models catalog carries the authoritative values */
