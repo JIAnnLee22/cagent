@@ -13,6 +13,9 @@
 
 #define OUTPUT_RESERVE 8192
 #define COMPACT_MIN_KEEP 4
+/* Summary requests must stay far below the 1M default window: the summary
+ * model needs output room and the transcript prompt is only a working
+ * draft. 256KiB of prompt text is already a big summarization job. */
 #define SUMMARY_INPUT_MAX_CHARS (256 * 1024)
 
 static void count_text_units(const char* text, int64_t* ascii_bytes, int64_t* codepoints) {
