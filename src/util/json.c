@@ -409,13 +409,13 @@ int json_builder_arr_add_bool(JsonBuilder* b, JsonMut* arr, bool value) {
     return AGENT_ERR_OOM;
 }
 
-int json_builder_stringify(JsonBuilder* b, String* out) {
+static int json_builder_stringify_flags(JsonBuilder* b, String* out, yyjson_write_flag flags) {
     if (b == NULL || out == NULL || b->root == NULL) {
         return AGENT_ERR_JSON;
     }
 
     size_t len = 0;
-    const char* text = yyjson_mut_write(b->doc, 0, &len);
+    const char* text = yyjson_mut_write(b->doc, flags, &len);
     if (text == NULL) {
         return AGENT_ERR_JSON;
     }
@@ -423,6 +423,14 @@ int json_builder_stringify(JsonBuilder* b, String* out) {
     int err = string_append_n(out, text, len);
     free((void*)text);
     return err;
+}
+
+int json_builder_stringify(JsonBuilder* b, String* out) {
+    return json_builder_stringify_flags(b, out, 0);
+}
+
+int json_builder_stringify_pretty(JsonBuilder* b, String* out) {
+    return json_builder_stringify_flags(b, out, YYJSON_WRITE_PRETTY);
 }
 
 void json_builder_reset(JsonBuilder* b) {

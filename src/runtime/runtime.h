@@ -38,6 +38,12 @@ typedef struct {
 } ModelConfig;
 
 typedef struct {
+    char* name;             /* owned; custom provider name */
+    char* base_url;         /* owned; custom provider endpoint */
+    char* protocol;         /* owned; openai, anthropic, or responses */
+} CustomProviderConfig;
+
+typedef struct {
     char* provider;    /* owned; builtin or custom provider name */
     char* base_url;    /* owned; NULL -> provider default */
     char* api_key_env; /* owned; legacy override; auth.json is preferred */
@@ -45,6 +51,7 @@ typedef struct {
     char* protocol;    /* owned; "openai" (default), "anthropic", or "responses" */
     char* models_path; /* owned; custom provider model catalog path */
     char* model_name;  /* owned; NULL -> default model */
+    char* thinking_level; /* owned; optional persisted reasoning level */
     char* cwd;         /* owned; NULL -> current directory */
     int64_t max_tokens;
     int64_t context_window;
@@ -59,6 +66,8 @@ typedef struct {
     int64_t max_retries;           /* transient model request retries; default 5 */
     ModelConfig* models;           /* owned; extra named models; may be NULL */
     size_t n_models;
+    CustomProviderConfig* custom_providers; /* owned; custom provider metadata */
+    size_t n_custom_providers;
 } Config;
 
 void model_config_free(ModelConfig* m);
@@ -69,12 +78,22 @@ void config_free(Config* c);
 /* Overlay fields present in a JSON config file. Missing file/keys keep
  * current values. Returns AGENT_OK (even when the file is absent). */
 int config_load_file(Config* c, const char* path);
-/* Atomically update the persisted default model while preserving all other
- * JSON settings. The path is normally ~/.config/cagent/config.json or the
- * value supplied by --config. */
+/* Load ~/.config/cagent/custom_provider.json. The file contains only custom
+ * provider metadata; credentials are resolved from auth.json by provider name.
+ * Missing file is successful. */
+int config_load_custom_providers(Config* c);
+/* Load the cached catalogs from ~/.config/cagent/models.json. The canonical
+ * shape is {"provider":["model", ...]}; missing files are successful. */
+int config_load_models_file(Config* c);
+/* Persist discovered catalogs as {"provider":["model", ...]}. */
+int config_save_models_file(const Config* c);
+/* Atomically persist only the selected model and optional thinking level. */
 int config_save_model(const char* path, const char* model_name);
-/* Persist the active provider separately from the bare API model name. */
+/* Persist a canonical provider/model selector in config.json. */
 int config_save_selection(const char* path, const char* provider_name, const char* model_name);
+int config_save_selection_with_thinking(const char* path, const char* provider_name,
+                                        const char* model_name,
+                                        const char* thinking_level);
 
 typedef struct Runtime {
     Provider* provider; /* owned; default endpoint */

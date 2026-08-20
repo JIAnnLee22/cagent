@@ -106,6 +106,16 @@ static Provider* provider_from_config(const char* base_url, const char* provider
     return provider_new_auth(base_url, provider_name, path[0] != '\0' ? path : NULL, api_key_env);
 }
 
+static void custom_provider_config_free(CustomProviderConfig* provider) {
+    if (provider == NULL) {
+        return;
+    }
+    free(provider->name);
+    free(provider->base_url);
+    free(provider->protocol);
+    memset(provider, 0, sizeof(*provider));
+}
+
 void model_config_free(ModelConfig* m) {
     if (m == NULL) {
         return;
@@ -147,11 +157,16 @@ void config_free(Config* c) {
     free(c->protocol);
     free(c->models_path);
     free(c->model_name);
+    free(c->thinking_level);
     free(c->cwd);
     for (size_t i = 0; i < c->n_models; i++) {
         model_config_free(&c->models[i]);
     }
     free(c->models);
+    for (size_t i = 0; i < c->n_custom_providers; i++) {
+        custom_provider_config_free(&c->custom_providers[i]);
+    }
+    free(c->custom_providers);
     memset(c, 0, sizeof(*c));
 }
 
@@ -241,6 +256,17 @@ int config_load_file(Config* c, const char* path) {
         free(c->model_name);
         c->model_name = strdup(v);
     }
+    v = json_obj_get_str(root, "thinking_level");
+    if (v == NULL) {
+        v = json_obj_get_str(root, "thinking");
+    }
+    if (v == NULL) {
+        v = json_obj_get_str(root, "thinkingLevel");
+    }
+    if (v != NULL) {
+        free(c->thinking_level);
+        c->thinking_level = strdup(v);
+    }
     /* Older configs may have persisted provider/model as one selector while
      * omitting the provider field. Recover the provider before runtime
      * construction so the bare model id is sent to the right endpoint. */
@@ -255,6 +281,15 @@ int config_load_file(Config* c, const char* path) {
             }
             free(c->provider);
             c->provider = inferred;
+            /* The wire API needs the bare id; the provider is kept separately
+             * in memory after reading the canonical selector. */
+            char* bare = strdup(slash + 1);
+            if (bare == NULL) {
+                json_doc_free(doc);
+                return AGENT_ERR_OOM;
+            }
+            free(c->model_name);
+            c->model_name = bare;
         }
     }
     int64_t iv;
@@ -376,34 +411,6 @@ int config_load_file(Config* c, const char* path) {
     return AGENT_OK;
 }
 
-typedef struct {
-    JsonBuilder* builder;
-    JsonMut* root;
-    const char* provider_name;
-    const char* model_name;
-    bool provider_written;
-    bool model_written;
-} ConfigSaveContext;
-
-static int config_save_member(const char* key, const JsonVal* value, void* userdata) {
-    ConfigSaveContext* ctx = userdata;
-    if (strcmp(key, "provider") == 0 && ctx->provider_name != NULL) {
-        if (ctx->provider_written) {
-            return AGENT_OK;
-        }
-        ctx->provider_written = true;
-        return json_builder_obj_add_str(ctx->builder, ctx->root, "provider", ctx->provider_name);
-    }
-    if (strcmp(key, "model") == 0) {
-        if (ctx->model_written) {
-            return AGENT_OK;
-        }
-        ctx->model_written = true;
-        return json_builder_obj_add_str(ctx->builder, ctx->root, "model", ctx->model_name);
-    }
-    return json_builder_obj_add_val_copy(ctx->builder, ctx->root, key, value);
-}
-
 static int config_ensure_parent_dirs(const char* path) {
     char parent[PATH_MAX];
     size_t len = strlen(path);
@@ -435,85 +442,14 @@ static int config_ensure_parent_dirs(const char* path) {
     return AGENT_OK;
 }
 
-static int config_save_fields(const char* path, const char* provider_name,
-                              const char* model_name) {
-    if (path == NULL || path[0] == '\0' || model_name == NULL || model_name[0] == '\0' ||
-        (provider_name != NULL && provider_name[0] == '\0')) {
-        return AGENT_ERR_IO;
-    }
-
-    char* data = NULL;
-    size_t data_len = 0;
-    FILE* input = fopen(path, "rb");
-    if (input != NULL) {
-        if (fseek(input, 0, SEEK_END) != 0) {
-            fclose(input);
-            return AGENT_ERR_IO;
-        }
-        long size = ftell(input);
-        if (size < 0 || size > 1024 * 1024 || fseek(input, 0, SEEK_SET) != 0) {
-            fclose(input);
-            return AGENT_ERR_IO;
-        }
-        data = malloc((size_t)size + 1);
-        if (data == NULL) {
-            fclose(input);
-            return AGENT_ERR_OOM;
-        }
-        data_len = fread(data, 1, (size_t)size, input);
-        fclose(input);
-        data[data_len] = '\0';
-    } else if (errno != ENOENT) {
-        return AGENT_ERR_IO;
-    }
-
-    JsonDoc* doc = NULL;
-    JsonVal* root = NULL;
-    if (data != NULL) {
-        doc = json_parse(data, data_len);
-        root = doc != NULL ? json_root(doc) : NULL;
-        if (root == NULL || !json_val_is_obj(root)) {
-            free(data);
-            json_doc_free(doc);
-            return AGENT_ERR_JSON;
-        }
-    }
-
-    JsonBuilder* builder = json_builder_new();
-    JsonMut* out_root = builder != NULL ? json_builder_root_obj(builder) : NULL;
-    if (builder == NULL || out_root == NULL) {
-        free(data);
-        json_doc_free(doc);
-        json_builder_free(builder);
-        return AGENT_ERR_OOM;
-    }
-    ConfigSaveContext ctx = {
-        .builder = builder,
-        .root = out_root,
-        .provider_name = provider_name,
-        .model_name = model_name,
-        .provider_written = false,
-        .model_written = false,
-    };
-    int rc = root != NULL ? json_obj_foreach(root, config_save_member, &ctx) : AGENT_OK;
-    if (rc == AGENT_OK && provider_name != NULL && !ctx.provider_written) {
-        rc = json_builder_obj_add_str(builder, out_root, "provider", provider_name);
-    }
-    if (rc == AGENT_OK && !ctx.model_written) {
-        rc = json_builder_obj_add_str(builder, out_root, "model", model_name);
-    }
+static int config_write_json(const char* path, JsonBuilder* builder) {
     String serialized = string_new();
-    if (rc == AGENT_OK) {
-        rc = json_builder_stringify(builder, &serialized);
-    }
+    int rc = json_builder_stringify_pretty(builder, &serialized);
     json_builder_free(builder);
-    json_doc_free(doc);
-    free(data);
     if (rc != AGENT_OK) {
         string_free(&serialized);
         return rc;
     }
-
     rc = config_ensure_parent_dirs(path);
     if (rc != AGENT_OK) {
         string_free(&serialized);
@@ -539,8 +475,7 @@ static int config_save_fields(const char* path, const char* provider_name,
     }
     bool ok = fwrite(serialized.data, 1, serialized.len, output) == serialized.len;
     if (ok) {
-        fputc('\n', output);
-        ok = !ferror(output) && fflush(output) == 0;
+        ok = fputc('\n', output) != EOF && !ferror(output) && fflush(output) == 0;
     }
     int close_rc = fclose(output);
     if (!ok || close_rc != 0 || rename(temp, path) != 0) {
@@ -552,12 +487,125 @@ static int config_save_fields(const char* path, const char* provider_name,
     return AGENT_OK;
 }
 
+static int config_save_selection_impl(const char* path, const char* provider_name,
+                                      const char* model_name, const char* thinking_level,
+                                      bool qualify_model) {
+    if (path == NULL || path[0] == '\0' || model_name == NULL || model_name[0] == '\0' ||
+        (provider_name != NULL && provider_name[0] == '\0')) {
+        return AGENT_ERR_IO;
+    }
+    String selector = string_new();
+    const char* saved_model = model_name;
+    if (qualify_model && provider_name != NULL && strchr(model_name, '/') == NULL) {
+        if (string_printf(&selector, "%s/%s", provider_name, model_name) != AGENT_OK) {
+            string_free(&selector);
+            return AGENT_ERR_OOM;
+        }
+        saved_model = selector.data;
+    }
+    JsonBuilder* builder = json_builder_new();
+    JsonMut* root = builder != NULL ? json_builder_root_obj(builder) : NULL;
+    int rc = (builder == NULL || root == NULL)
+                 ? AGENT_ERR_OOM
+                 : json_builder_obj_add_str(builder, root, "model", saved_model);
+    if (rc == AGENT_OK && thinking_level != NULL && thinking_level[0] != '\0') {
+        rc = json_builder_obj_add_str(builder, root, "thinking_level", thinking_level);
+    }
+    string_free(&selector);
+    if (rc != AGENT_OK) {
+        json_builder_free(builder);
+        return rc;
+    }
+    return config_write_json(path, builder);
+}
+
+typedef struct {
+    JsonBuilder* builder;
+    JsonMut* root;
+    const char* model_name;
+} LegacyConfigSaveContext;
+
+static int legacy_config_save_member(const char* key, const JsonVal* value, void* userdata) {
+    LegacyConfigSaveContext* context = userdata;
+    if (strcmp(key, "model") == 0) {
+        return json_builder_obj_add_str(context->builder, context->root, "model",
+                                        context->model_name);
+    }
+    return json_builder_obj_add_val_copy(context->builder, context->root, key, value);
+}
+
+static int config_save_model_legacy(const char* path, const char* model_name) {
+    FILE* input = fopen(path, "rb");
+    if (input == NULL)
+        return errno == ENOENT ? config_save_selection_impl(path, NULL, model_name, NULL, false)
+                               : AGENT_ERR_IO;
+    if (fseek(input, 0, SEEK_END) != 0) {
+        fclose(input);
+        return AGENT_ERR_IO;
+    }
+    long size = ftell(input);
+    if (size < 0 || size > 1024 * 1024 || fseek(input, 0, SEEK_SET) != 0) {
+        fclose(input);
+        return AGENT_ERR_IO;
+    }
+    char* data = malloc((size_t)size + 1);
+    if (data == NULL) {
+        fclose(input);
+        return AGENT_ERR_OOM;
+    }
+    size_t n = fread(data, 1, (size_t)size, input);
+    fclose(input);
+    data[n] = '\0';
+    JsonDoc* doc = json_parse(data, n);
+    free(data);
+    JsonVal* old_root = doc != NULL ? json_root(doc) : NULL;
+    if (old_root == NULL || !json_val_is_obj(old_root)) {
+        json_doc_free(doc);
+        return AGENT_ERR_JSON;
+    }
+    JsonBuilder* builder = json_builder_new();
+    JsonMut* root = builder != NULL ? json_builder_root_obj(builder) : NULL;
+    LegacyConfigSaveContext context = {builder, root, model_name};
+    int rc = root != NULL ? json_obj_foreach(old_root, legacy_config_save_member, &context)
+                          : AGENT_ERR_OOM;
+    if (rc == AGENT_OK && json_builder_obj_get(builder, root, "model") == NULL)
+        rc = json_builder_obj_add_str(builder, root, "model", model_name);
+    const char* slash = strchr(model_name, '/');
+    if (rc == AGENT_OK && slash != NULL && json_builder_obj_get(builder, root, "provider") == NULL) {
+        char* provider = strndup(model_name, (size_t)(slash - model_name));
+        if (provider == NULL)
+            rc = AGENT_ERR_OOM;
+        else {
+            rc = json_builder_obj_add_str(builder, root, "provider", provider);
+            free(provider);
+        }
+    }
+    if (rc != AGENT_OK) {
+        json_builder_free(builder);
+        json_doc_free(doc);
+        return rc;
+    }
+    int save_rc = config_write_json(path, builder);
+    json_doc_free(doc);
+    return save_rc;
+}
+
 int config_save_model(const char* path, const char* model_name) {
-    return config_save_fields(path, NULL, model_name);
+    /* Compatibility for callers that deliberately maintain a rich legacy
+     * config. Interactive selection uses config_save_selection instead. */
+    if (path == NULL || model_name == NULL || model_name[0] == '\0')
+        return AGENT_ERR_IO;
+    return config_save_model_legacy(path, model_name);
 }
 
 int config_save_selection(const char* path, const char* provider_name, const char* model_name) {
-    return config_save_fields(path, provider_name, model_name);
+    return config_save_selection_impl(path, provider_name, model_name, NULL, true);
+}
+
+int config_save_selection_with_thinking(const char* path, const char* provider_name,
+                                        const char* model_name,
+                                        const char* thinking_level) {
+    return config_save_selection_impl(path, provider_name, model_name, thinking_level, true);
 }
 
 typedef struct {
@@ -820,6 +868,432 @@ static int model_config_append(Config* cfg, ModelConfig* entry) {
     return AGENT_OK;
 }
 
+static const char* custom_json_str(const JsonVal* obj, const char* primary,
+                                   const char* fallback) {
+    const char* value = json_obj_get_str(obj, primary);
+    return value != NULL ? value : json_obj_get_str(obj, fallback);
+}
+
+static bool custom_model_seen(const Config* cfg, const char* provider, const char* name) {
+    for (size_t i = 0; i < cfg->n_models; i++) {
+        const ModelConfig* model = &cfg->models[i];
+        const char* model_provider = model->provider != NULL ? model->provider : cfg->provider;
+        if (model->name != NULL && model_provider != NULL && strcmp(model_provider, provider) == 0 &&
+            strcmp(model->name, name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static CustomProviderConfig* custom_provider_find(Config* cfg, const char* name) {
+    if (cfg == NULL || name == NULL) {
+        return NULL;
+    }
+    for (size_t i = 0; i < cfg->n_custom_providers; i++) {
+        if (strcmp(cfg->custom_providers[i].name, name) == 0) {
+            return &cfg->custom_providers[i];
+        }
+    }
+    return NULL;
+}
+
+static int custom_provider_add_meta(Config* cfg, const char* name, const char* base_url,
+                                    const char* protocol) {
+    CustomProviderConfig* existing = custom_provider_find(cfg, name);
+    if (existing != NULL) {
+        return AGENT_OK;
+    }
+    CustomProviderConfig* grown = realloc(
+        cfg->custom_providers, (cfg->n_custom_providers + 1) * sizeof(*grown));
+    if (grown == NULL) {
+        return AGENT_ERR_OOM;
+    }
+    cfg->custom_providers = grown;
+    CustomProviderConfig* entry = &grown[cfg->n_custom_providers];
+    memset(entry, 0, sizeof(*entry));
+    entry->name = strdup(name);
+    entry->base_url = strdup(base_url);
+    entry->protocol = strdup(protocol);
+    if (entry->name == NULL || entry->base_url == NULL || entry->protocol == NULL) {
+        custom_provider_config_free(entry);
+        return AGENT_ERR_OOM;
+    }
+    cfg->n_custom_providers++;
+    return AGENT_OK;
+}
+
+static int custom_provider_add_spec(Config* cfg, const JsonVal* spec,
+                                    const char* map_name) {
+    if (cfg == NULL || spec == NULL || !json_val_is_obj(spec)) {
+        return AGENT_ERR_JSON;
+    }
+    const char* name = custom_json_str(spec, "name", "provider");
+    if ((name == NULL || name[0] == '\0') && map_name != NULL) {
+        name = map_name;
+    }
+    const char* base_url = custom_json_str(spec, "baseUrl", "base_url");
+    const char* protocol = custom_json_str(spec, "type", "protocol");
+    const char* models_path = custom_json_str(spec, "modelsPath", "models_path");
+    JsonVal* models = json_val_obj_get(spec, "models");
+    if (name == NULL || name[0] == '\0' || base_url == NULL || base_url[0] == '\0' ||
+        protocol == NULL || protocol[0] == '\0' ||
+        (strcmp(protocol, "openai") != 0 && strcmp(protocol, "anthropic") != 0 &&
+         strcmp(protocol, "responses") != 0)) {
+        return AGENT_ERR_JSON;
+    }
+    int rc = custom_provider_add_meta(cfg, name, base_url, protocol);
+    if (rc != AGENT_OK) {
+        return rc;
+    }
+
+    if (cfg->provider != NULL && strcmp(cfg->provider, name) == 0) {
+        if (cfg->base_url == NULL) {
+            cfg->base_url = strdup(base_url);
+        }
+        if (cfg->protocol == NULL) {
+            cfg->protocol = strdup(protocol);
+        }
+        if (cfg->models_path == NULL && models_path != NULL) {
+            cfg->models_path = strdup(models_path);
+        }
+        if (cfg->base_url == NULL || cfg->protocol == NULL ||
+            (models_path != NULL && cfg->models_path == NULL)) {
+            return AGENT_ERR_OOM;
+        }
+    }
+
+    /* `models` is accepted only as a migration path. New files keep this
+     * catalog in models.json, so custom_provider.json contains metadata only. */
+    if (models == NULL || !json_val_is_arr(models)) {
+        return AGENT_OK;
+    }
+    for (size_t i = 0; i < json_val_arr_size(models); i++) {
+        JsonVal* item = json_val_arr_get(models, i);
+        const char* model_name = json_val_is_str(item) ? json_val_str(item) : NULL;
+        const char* label = NULL;
+        if (item != NULL && json_val_is_obj(item)) {
+            model_name = custom_json_str(item, "name", "id");
+            label = json_obj_get_str(item, "label");
+        }
+        if (model_name == NULL || model_name[0] == '\0' || custom_model_seen(cfg, name, model_name)) {
+            continue;
+        }
+        ModelConfig model = {0};
+        model.name = strdup(model_name);
+        model.label = label != NULL ? strdup(label) : NULL;
+        model.provider = strdup(name);
+        model.base_url = strdup(base_url);
+        model.protocol = strdup(protocol);
+        model.models_path = models_path != NULL ? strdup(models_path) : NULL;
+        if (item != NULL && json_val_is_obj(item)) {
+            model.context_window = json_obj_get_int(item, "contextWindow", 0);
+            if (model.context_window <= 0)
+                model.context_window = json_obj_get_int(item, "context_window", 0);
+            model.max_output = json_obj_get_int(item, "maxOutput", 0);
+            if (model.max_output <= 0)
+                model.max_output = json_obj_get_int(item, "max_output", 0);
+            model.input_price = json_obj_get_num(item, "priceIn", 0.0);
+            model.output_price = json_obj_get_num(item, "priceOut", 0.0);
+            model.subscription = json_obj_get_bool(item, "subscription", false);
+        }
+        if (model.name == NULL || model.provider == NULL || model.base_url == NULL ||
+            model.protocol == NULL || (label != NULL && model.label == NULL) ||
+            (models_path != NULL && model.models_path == NULL) ||
+            model_config_append(cfg, &model) != AGENT_OK) {
+            model_config_free(&model);
+            return AGENT_ERR_OOM;
+        }
+        if (cfg->provider != NULL && strcmp(cfg->provider, name) == 0 &&
+            cfg->model_name == NULL) {
+            cfg->model_name = strdup(model_name);
+            if (cfg->model_name == NULL)
+                return AGENT_ERR_OOM;
+        }
+    }
+    return AGENT_OK;
+}
+
+typedef struct {
+    Config* config;
+    int rc;
+} CustomProviderLoadContext;
+
+static int custom_provider_map_entry(const char* key, const JsonVal* value, void* userdata) {
+    CustomProviderLoadContext* context = userdata;
+    if (context->rc != AGENT_OK) {
+        return context->rc;
+    }
+    context->rc = custom_provider_add_spec(context->config, value, key);
+    return context->rc;
+}
+
+int config_load_custom_providers(Config* c) {
+    if (c == NULL) {
+        return AGENT_ERR_IO;
+    }
+    const char* home = getenv("HOME");
+    if (home == NULL) {
+        return AGENT_OK;
+    }
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/.config/cagent/custom_provider.json", home) >=
+        (int)sizeof(path)) {
+        return AGENT_ERR_IO;
+    }
+    FILE* f = fopen(path, "rb");
+    if (f == NULL) {
+        return errno == ENOENT ? AGENT_OK : AGENT_ERR_IO;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return AGENT_ERR_IO;
+    }
+    long size = ftell(f);
+    if (size < 0 || size > 1024 * 1024 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return AGENT_ERR_IO;
+    }
+    char* data = malloc((size_t)size + 1);
+    if (data == NULL) {
+        fclose(f);
+        return AGENT_ERR_OOM;
+    }
+    size_t n = fread(data, 1, (size_t)size, f);
+    int close_rc = fclose(f);
+    data[n] = '\0';
+    if (close_rc != 0 || n != (size_t)size) {
+        free(data);
+        return AGENT_ERR_IO;
+    }
+    JsonDoc* doc = json_parse(data, n);
+    free(data);
+    JsonVal* root = doc != NULL ? json_root(doc) : NULL;
+    if (root == NULL) {
+        json_doc_free(doc);
+        return AGENT_ERR_JSON;
+    }
+
+    int rc = AGENT_OK;
+    JsonVal* providers = NULL;
+    if (json_val_is_arr(root)) {
+        for (size_t i = 0; i < json_val_arr_size(root); i++) {
+            rc = custom_provider_add_spec(c, json_val_arr_get(root, i), NULL);
+            if (rc != AGENT_OK)
+                break;
+        }
+    } else if (json_val_is_obj(root) &&
+               (providers = json_val_obj_get(root, "providers")) != NULL) {
+        if (json_val_is_arr(providers)) {
+            for (size_t i = 0; i < json_val_arr_size(providers); i++) {
+                rc = custom_provider_add_spec(c, json_val_arr_get(providers, i), NULL);
+                if (rc != AGENT_OK)
+                    break;
+            }
+        } else if (json_val_is_obj(providers)) {
+            CustomProviderLoadContext context = {.config = c, .rc = AGENT_OK};
+            json_obj_foreach(providers, custom_provider_map_entry, &context);
+            rc = context.rc;
+        } else {
+            rc = AGENT_ERR_JSON;
+        }
+    } else if (json_val_is_obj(root) && json_obj_get_str(root, "name") != NULL) {
+        rc = custom_provider_add_spec(c, root, NULL);
+    } else if (json_val_is_obj(root)) {
+        /* Canonical form: {"provider-name":{"baseUrl":"...","type":"openai"}}. */
+        CustomProviderLoadContext context = {.config = c, .rc = AGENT_OK};
+        json_obj_foreach(root, custom_provider_map_entry, &context);
+        rc = context.rc;
+    } else {
+        rc = AGENT_ERR_JSON;
+    }
+    json_doc_free(doc);
+    return rc;
+}
+
+typedef struct {
+    Config* config;
+    int rc;
+} ModelsLoadContext;
+
+static const char* model_json_name(const JsonVal* value) {
+    if (value == NULL) {
+        return NULL;
+    }
+    if (json_val_is_str(value)) {
+        return json_val_str(value);
+    }
+    if (json_val_is_obj(value)) {
+        const char* name = json_obj_get_str(value, "name");
+        return name != NULL ? name : json_obj_get_str(value, "id");
+    }
+    return NULL;
+}
+
+static int models_add_provider_array(const char* provider, const JsonVal* models,
+                                     void* userdata) {
+    ModelsLoadContext* context = userdata;
+    Config* cfg = context != NULL ? context->config : NULL;
+    if (context == NULL || cfg == NULL || models == NULL || !json_val_is_arr(models)) {
+        return AGENT_ERR_JSON;
+    }
+    CustomProviderConfig* custom = custom_provider_find(cfg, provider);
+    const char* base_url = custom != NULL ? custom->base_url : provider_builtin_base_url(provider);
+    const char* protocol = custom != NULL ? custom->protocol : provider_builtin_protocol(provider);
+    if (base_url == NULL || protocol == NULL) {
+        /* A stale cache entry must not make startup fail; it will be replaced
+         * when the provider is configured again. */
+        return AGENT_OK;
+    }
+    if (cfg->provider != NULL && strcmp(cfg->provider, provider) == 0) {
+        if (cfg->base_url == NULL)
+            cfg->base_url = strdup(base_url);
+        if (cfg->protocol == NULL)
+            cfg->protocol = strdup(protocol);
+        if (cfg->base_url == NULL || cfg->protocol == NULL)
+            return AGENT_ERR_OOM;
+    }
+    for (size_t i = 0; i < json_val_arr_size(models); i++) {
+        JsonVal* item = json_val_arr_get(models, i);
+        const char* name = model_json_name(item);
+        if (name == NULL || name[0] == '\0' || custom_model_seen(cfg, provider, name)) {
+            continue;
+        }
+        ModelConfig model = {0};
+        model.name = strdup(name);
+        model.provider = strdup(provider);
+        model.base_url = strdup(base_url);
+        model.protocol = strdup(protocol);
+        if (item != NULL && json_val_is_obj(item)) {
+            model.label = json_obj_get_str(item, "label") != NULL
+                              ? strdup(json_obj_get_str(item, "label"))
+                              : NULL;
+            model.context_window = json_obj_get_int(item, "context_window", 0);
+            if (model.context_window <= 0)
+                model.context_window = json_obj_get_int(item, "contextWindow", 0);
+            model.max_output = json_obj_get_int(item, "max_output", 0);
+            if (model.max_output <= 0)
+                model.max_output = json_obj_get_int(item, "maxOutput", 0);
+            model.input_price = json_obj_get_num(item, "price_in", 0.0);
+            model.output_price = json_obj_get_num(item, "price_out", 0.0);
+            model.subscription = json_obj_get_bool(item, "subscription", false);
+        }
+        if (model.name == NULL || model.provider == NULL || model.base_url == NULL ||
+            model.protocol == NULL ||
+            (json_val_is_obj(item) && json_obj_get_str(item, "label") != NULL &&
+             model.label == NULL) || model_config_append(cfg, &model) != AGENT_OK) {
+            model_config_free(&model);
+            return AGENT_ERR_OOM;
+        }
+        if (cfg->provider != NULL && strcmp(cfg->provider, provider) == 0 &&
+            cfg->model_name == NULL) {
+            cfg->model_name = strdup(name);
+            if (cfg->model_name == NULL)
+                return AGENT_ERR_OOM;
+        }
+    }
+    return AGENT_OK;
+}
+
+static int models_load_entry(const char* key, const JsonVal* value, void* userdata) {
+    ModelsLoadContext* context = userdata;
+    if (context->rc != AGENT_OK)
+        return context->rc;
+    context->rc = models_add_provider_array(key, value, userdata);
+    return context->rc;
+}
+
+static int config_home_file(const char* name, char* path, size_t cap) {
+    const char* home = getenv("HOME");
+    if (home == NULL || name == NULL || path == NULL ||
+        snprintf(path, cap, "%s/.config/cagent/%s", home, name) >= (int)cap) {
+        return AGENT_ERR_IO;
+    }
+    return AGENT_OK;
+}
+
+int config_load_models_file(Config* c) {
+    if (c == NULL)
+        return AGENT_ERR_IO;
+    char path[PATH_MAX];
+    if (config_home_file("models.json", path, sizeof(path)) != AGENT_OK)
+        return AGENT_OK;
+    FILE* f = fopen(path, "rb");
+    if (f == NULL)
+        return errno == ENOENT ? AGENT_OK : AGENT_ERR_IO;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return AGENT_ERR_IO;
+    }
+    long size = ftell(f);
+    if (size < 0 || size > 1024 * 1024 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return AGENT_ERR_IO;
+    }
+    char* data = malloc((size_t)size + 1);
+    if (data == NULL) {
+        fclose(f);
+        return AGENT_ERR_OOM;
+    }
+    size_t n = fread(data, 1, (size_t)size, f);
+    int close_rc = fclose(f);
+    data[n] = '\0';
+    if (close_rc != 0 || n != (size_t)size) {
+        free(data);
+        return AGENT_ERR_IO;
+    }
+    JsonDoc* doc = json_parse(data, n);
+    free(data);
+    JsonVal* root = doc != NULL ? json_root(doc) : NULL;
+    if (root == NULL || !json_val_is_obj(root)) {
+        json_doc_free(doc);
+        return AGENT_ERR_JSON;
+    }
+    ModelsLoadContext context = {.config = c, .rc = AGENT_OK};
+    json_obj_foreach(root, models_load_entry, &context);
+    json_doc_free(doc);
+    return context.rc;
+}
+
+int config_save_models_file(const Config* c) {
+    if (c == NULL)
+        return AGENT_ERR_IO;
+    char path[PATH_MAX];
+    if (config_home_file("models.json", path, sizeof(path)) != AGENT_OK)
+        return AGENT_ERR_IO;
+    JsonBuilder* builder = json_builder_new();
+    JsonMut* root = builder != NULL ? json_builder_root_obj(builder) : NULL;
+    if (builder == NULL || root == NULL) {
+        json_builder_free(builder);
+        return AGENT_ERR_OOM;
+    }
+    int rc = AGENT_OK;
+    for (size_t i = 0; i < c->n_models && rc == AGENT_OK; i++) {
+        const ModelConfig* model = &c->models[i];
+        const char* provider = model->provider != NULL ? model->provider : c->provider;
+        if (provider == NULL || model->name == NULL || model->name[0] == '\0')
+            continue;
+        JsonMut* array = json_builder_obj_get(builder, root, provider);
+        if (array == NULL)
+            array = json_builder_obj_add_arr(builder, root, provider);
+        if (array == NULL) {
+            rc = AGENT_ERR_OOM;
+            break;
+        }
+        const char* name = model->name;
+        size_t provider_len = strlen(provider);
+        if (strncmp(name, provider, provider_len) == 0 && name[provider_len] == '/')
+            name += provider_len + 1;
+        /* Discovery de-duplicates catalogs before this point. */
+        rc = json_builder_arr_add_str(builder, array, name);
+    }
+    if (rc != AGENT_OK) {
+        json_builder_free(builder);
+        return rc;
+    }
+    return config_write_json(path, builder);
+}
+
 static bool provider_name_seen(char* const* names, size_t count, const char* name) {
     for (size_t i = 0; i < count; i++) {
         if (strcmp(names[i], name) == 0) {
@@ -908,9 +1382,17 @@ static int discover_provider_probe(const Config* source, const char* provider,
         return AGENT_ERR_OOM;
     }
     const bool is_default = source->provider != NULL && strcmp(source->provider, provider) == 0;
+    const CustomProviderConfig* custom = NULL;
+    for (size_t i = 0; i < source->n_custom_providers; i++) {
+        if (strcmp(source->custom_providers[i].name, provider) == 0) {
+            custom = &source->custom_providers[i];
+            break;
+        }
+    }
     const char* base = hint != NULL && hint->base_url != NULL
                            ? hint->base_url
-                           : (is_default ? source->base_url : NULL);
+                           : (is_default ? source->base_url :
+                              (custom != NULL ? custom->base_url : NULL));
     const char* keyenv = hint != NULL && hint->api_key_env != NULL
                              ? hint->api_key_env
                              : (is_default ? source->api_key_env : NULL);
@@ -918,7 +1400,8 @@ static int discover_provider_probe(const Config* source, const char* provider,
         hint != NULL && hint->auth != NULL ? hint->auth : (is_default ? source->auth : NULL);
     const char* protocol = hint != NULL && hint->protocol != NULL
                                ? hint->protocol
-                               : (is_default ? source->protocol : NULL);
+                               : (is_default ? source->protocol :
+                                  (custom != NULL ? custom->protocol : NULL));
     const char* models_path = hint != NULL && hint->models_path != NULL
                                   ? hint->models_path
                                   : (is_default ? source->models_path : NULL);
@@ -1126,7 +1609,7 @@ int runtime_discover_all_models(Config* cfg, char* failures, size_t failures_cap
     /* Discover the selected provider, providers explicitly named by model
      * entries, and ChatGPT when a complete OAuth login is present. This keeps
      * unrelated builtins lazy while making `cagent --login` visible in /model. */
-    size_t name_cap = static_count + 3;
+    size_t name_cap = static_count + cfg->n_custom_providers + 3;
     char** providers = calloc(name_cap, sizeof(*providers));
     if (providers == NULL) {
         for (size_t i = 0; i < static_count; i++)
@@ -1146,6 +1629,17 @@ int runtime_discover_all_models(Config* cfg, char* failures, size_t failures_cap
     for (size_t i = 0; i < static_count; i++) {
         const char* provider =
             static_models[i].provider != NULL ? static_models[i].provider : cfg->provider;
+        if (!provider_name_seen(providers, provider_count, provider)) {
+            providers[provider_count] = strdup(provider);
+            if (providers[provider_count] == NULL) {
+                rc = AGENT_ERR_OOM;
+                break;
+            }
+            provider_count++;
+        }
+    }
+    for (size_t i = 0; rc == AGENT_OK && i < cfg->n_custom_providers; i++) {
+        const char* provider = cfg->custom_providers[i].name;
         if (!provider_name_seen(providers, provider_count, provider)) {
             providers[provider_count] = strdup(provider);
             if (providers[provider_count] == NULL) {
@@ -1266,12 +1760,26 @@ int runtime_discover_all_models(Config* cfg, char* failures, size_t failures_cap
     for (size_t i = 0; i < provider_count; i++)
         free(providers[i]);
     free(providers);
+    if (rc == AGENT_OK || cfg->n_models > 0) {
+        int save_rc = config_save_models_file(cfg);
+        if (save_rc != AGENT_OK) {
+            log_warn("cannot save models.json (%s)", error_name(save_rc));
+        }
+    }
     return rc;
 }
 
 static int config_resolve_provider(Config* c) {
     if (c == NULL) {
         return AGENT_ERR_IO;
+    }
+    /* runtime_new() may be called directly by embedders/tests, without the
+     * main startup path that preloads custom providers. Loading here keeps
+     * custom_provider.json available in that path too. Duplicate entries are
+     * harmless because the loader de-duplicates provider/model pairs. */
+    int custom_rc = config_load_custom_providers(c);
+    if (custom_rc != AGENT_OK && custom_rc != AGENT_ERR_JSON) {
+        return custom_rc;
     }
     if (c->provider == NULL && legacy_auth_is_chatgpt(c->auth)) {
         c->provider = strdup("chatgpt");
@@ -1341,6 +1849,11 @@ static int config_resolve_provider(Config* c) {
             c->api_key_env = strdup(builtin_key);
         }
         return c->base_url != NULL && c->protocol != NULL ? AGENT_OK : AGENT_ERR_OOM;
+    }
+    /* A custom_provider.json entry is self-contained: unlike the legacy
+     * providers.json registry it already supplied base_url and protocol. */
+    if (c->base_url != NULL && c->protocol != NULL) {
+        return AGENT_OK;
     }
 
     const char* home = getenv("HOME");

@@ -139,6 +139,57 @@ static int test_config_auth_field(void) {
     return g_failures;
 }
 
+static int test_custom_provider_and_named_auth(void) {
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s/.config/cagent", g_tmpdir);
+    /* The test HOME is the temporary directory; create its config path. */
+    char config_dir[PATH_MAX];
+    snprintf(config_dir, sizeof(config_dir), "%s/.config", g_tmpdir);
+    mkdir(config_dir, 0700);
+    mkdir(dir, 0700);
+
+    char custom_path[PATH_MAX];
+    char auth_path[PATH_MAX];
+    snprintf(custom_path, sizeof(custom_path), "%s/custom_provider.json", dir);
+    snprintf(auth_path, sizeof(auth_path), "%s/auth.json", dir);
+    FILE* f = fopen(custom_path, "wb");
+    CHECK(f != NULL);
+    if (f != NULL) {
+        fputs("{\"name\":\"my-gateway\",\"baseUrl\":\"https://example.test/v1\","
+              "\"protocol\":\"openai\",\"models\":[\"model-a\","
+              "{\"name\":\"model-b\",\"contextWindow\":8192}]}",
+              f);
+        fclose(f);
+    }
+    f = fopen(auth_path, "wb");
+    CHECK(f != NULL);
+    if (f != NULL) {
+        fputs("{\"my-gateway\":{\"type\":\"api_key\",\"key\":\"named-key\"}}", f);
+        fclose(f);
+    }
+
+    Config cfg = config_default();
+    free(cfg.provider);
+    cfg.provider = strdup("my-gateway");
+    CHECK(config_load_custom_providers(&cfg) == AGENT_OK);
+    CHECK(cfg.base_url != NULL && strcmp(cfg.base_url, "https://example.test/v1") == 0);
+    CHECK(cfg.protocol != NULL && strcmp(cfg.protocol, "openai") == 0);
+    CHECK(cfg.model_name != NULL && strcmp(cfg.model_name, "model-a") == 0);
+    CHECK(cfg.n_models == 2);
+    CHECK(cfg.models[1].context_window == 8192);
+
+    Provider* p = provider_new_auth(cfg.base_url, cfg.provider, auth_path, NULL);
+    CHECK(p != NULL);
+    CHECK(p != NULL && p->api_key != NULL && strcmp(p->api_key, "named-key") == 0);
+    provider_free(p);
+    config_free(&cfg);
+    unlink(custom_path);
+    unlink(auth_path);
+    rmdir(dir);
+    rmdir(config_dir);
+    return g_failures;
+}
+
 int main(void) {
     char template[] = "/tmp/cagent-oauth-test-XXXXXX";
     char* dir = mkdtemp(template);
@@ -153,6 +204,7 @@ int main(void) {
     test_api_key_auth_merge();
     test_chatgpt_provider_loads_token();
     test_config_auth_field();
+    test_custom_provider_and_named_auth();
     if (dir != NULL) {
         rmdir(dir);
     }

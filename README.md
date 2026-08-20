@@ -22,7 +22,7 @@ ctest --test-dir build         # 27 个测试（Debug + ASan 双构建）
 # API key provider 使用 ~/.config/cagent/auth.json 配置密钥来源
 ```
 
-配置文件 `~/.config/cagent/config.json`（参考 `config.example.json`）只保存 `provider`/`base_url`/`protocol`/`model`/`models[]` 等运行配置。`project_memory_max_bytes` 可调整自动注入的根 `PROGRESS.md` 摘要上限（默认 4096，设为 0 可关闭）；鉴权统一保存于 `~/.config/cagent/auth.json`（参考 `auth.example.json`）：
+配置文件 `~/.config/cagent/config.json`（参考 `config.example.json`）只保存当前选择的模型和思考等级：`model` 使用 `provider/model` 形式，`thinking_level` 可选。模型目录缓存统一保存到 `~/.config/cagent/models.json`，格式为 `{ "provider": ["model", ...] }`；启动时会优先加载缓存并在请求成功后原子更新。鉴权统一保存于 `~/.config/cagent/auth.json`（参考 `auth.example.json`）：
 
 ```json
 {
@@ -33,7 +33,7 @@ ctest --test-dir build         # 27 个测试（Debug + ASan 双构建）
 }
 ```
 
-或 OAuth：
+或 OAuth（OAuth 登录所需的令牌字段由登录流程维护）：
 
 ```json
 {
@@ -47,9 +47,7 @@ ctest --test-dir build         # 27 个测试（Debug + ASan 双构建）
 }
 ```
 
-`cagent --login` 会自动创建/更新 OAuth 类型的 `auth.json`；API key 类型可参考 `auth.example.json` 手工创建。
-
-配置优先级：CLI > 环境变量 > 配置文件 > 默认值。`auth.json` 等同密码，API key/refresh token 永不写入日志、TUI 或 Session，文件权限为 0600。启动时实时获取当前 provider、`models[]` 显式引用的 provider，以及已完成 OAuth 登录的 ChatGPT 模型目录；不会探测其他无关服务，也不持久化模型缓存。模型目录不可用时保留静态配置并记录告警；显式模型缺失时会告警后回退。
+`cagent --login` 会自动创建/更新 OAuth 类型的 `auth.json`；API key 类型可参考 `auth.example.json` 手工创建。配置优先级：CLI > 环境变量 > 配置文件 > 默认值。`auth.json` 等同密码，API key/refresh token 永不写入日志、TUI 或 Session，文件权限为 0600。模型目录不可用时保留 `models.json` 中的列表并记录告警；显式模型缺失时会告警后回退。
 
 连续 coding loop 的 `max_retries` 默认 5，仅在尚未产生任何文本/tool-call delta 时对 429、可重试 5xx 和传输错误做 250ms 起、最高 8s 的非阻塞指数退避；HTTP 连接还启用了低速检测与 TCP keepalive，以便把断线/卡死交给同一重试策略恢复。重试进度会显示在状态栏，可在 `config.json` 覆盖。工具调用不再设置固定轮数上限，长任务由模型上下文窗口与自动 compaction 驱动。
 
@@ -63,31 +61,36 @@ cagent --device-code        # 无浏览器终端的设备码登录
 cagent --logout
 ```
 
-在 `config.json` 中选择 ChatGPT provider（端点和 Responses 协议自动内置）：
+在 `config.json` 中选择 ChatGPT 模型（端点和 Responses 协议自动内置）：
 
 ```json
 {
-  "provider": "chatgpt"
+  "model": "chatgpt/gpt-5"
 }
 ```
 
-启动时会请求当前 provider、`models[]` 显式引用 provider，以及 auth.json 中已完成 OAuth 登录的 ChatGPT `/models`；无需把 ChatGPT 设为默认 provider，它也会自动出现在 TUI 的 `/model` 选择器中。其他未使用的内置 provider 不会被探测，模型目录也不会写入缓存。选择器支持上下键移动、直接输入文字进行模糊过滤、回车确认；确认后的默认模型会原子保存到当前配置文件（默认 `config.json`，也支持 `-c settings.json`）。仍可用 `/model xiaomi/mimo-v1` 直接选择。
+启动时会请求当前 provider、`models.json` 中出现的 provider，以及 auth.json 中已完成 OAuth 登录的 ChatGPT `/models`；ChatGPT 会自动出现在 TUI 的 `/model` 选择器中。模型目录会写入 `models.json`。选择器支持上下键移动、直接输入文字进行模糊过滤、回车确认；确认后的默认模型会以 `provider/model` 形式原子保存到当前配置文件（默认 `config.json`，也支持 `-c settings.json`）。
 
-知名 provider 已内置端点：`opencode-go`、`openai`、`anthropic`、`chatgpt`、`openai-codex`（ChatGPT Codex 别名）。自定义 provider 写入 `~/.config/cagent/providers.json`：
+知名 provider 已内置端点：`opencode-go`、`openai`、`anthropic`、`chatgpt`、`openai-codex`（ChatGPT Codex 别名）。自定义 provider 只在 `~/.config/cagent/custom_provider.json` 中保存 `baseUrl` 和 `type`，API key 不写在这里，而是在 `~/.config/cagent/auth.json` 中用同名 key 匹配：
 
 ```json
 {
-  "providers": {
-    "my-gateway": {
-      "base_url": "https://llm.example.com/v1",
-      "protocol": "openai",
-      "models_path": "/models"
-    }
+  "my-gateway": {
+    "baseUrl": "https://llm.example.com/v1",
+    "type": "openai"
   }
 }
 ```
 
-然后在 `config.json` 使用 `{ "provider": "my-gateway" }`。ChatGPT Plus 的模型和额度由 Codex 后端控制，不等价于 API 平台额度。
+对应的 `auth.json`：
+
+```json
+{
+  "my-gateway": { "type": "api_key", "key": "YOUR_API_KEY" }
+}
+```
+
+旧版 `{ "providers": ... }` 和带 `models` 的自定义配置仍可读取；新模型列表统一写入 `models.json`。启动时会请求当前 provider 以及缓存中出现的 provider；请求失败时继续使用缓存。ChatGPT Plus 的模型和额度由 Codex 后端控制，不等价于 API 平台额度。
 
 ## 使用
 

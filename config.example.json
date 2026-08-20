@@ -1,33 +1,4 @@
 {
-  "provider": "opencode-go",
-  "model": "deepseek-v4-flash",
-  "max_tokens": 4096,
-  "max_concurrent_agents": 16,
-  "max_retries": 5,
-  "context_window": 128000,
-  "project_memory_max_bytes": 4096,
-  "input_price": 0.15,
-  "output_price": 0.6,
-  "subscription": false,
-  "models": [
-    {
-      "name": "deepseek-v4-flash",
-      "context_window": 128000,
-      "input_price": 0.15,
-      "output_price": 0.6
-    },
-    {
-      "name": "sonnet-4",
-      "provider": "anthropic",
-      "context_window": 200000,
-      "input_price": 3.0,
-      "output_price": 15.0
-    },
-    {
-      "name": "gpt-5-pro",
-      "provider": "chatgpt",
-      "context_window": 272000,
-      "subscription": true
-    }
-  ]
+  "model": "opencode-go/deepseek-v4-flash",
+  "thinking_level": "medium"
 }

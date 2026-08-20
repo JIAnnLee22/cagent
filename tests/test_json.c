@@ -132,6 +132,32 @@ static int test_builder_roundtrip(void) {
     return g_failures;
 }
 
+static int test_builder_pretty_stringify(void) {
+    JsonBuilder* b = json_builder_new();
+    CHECK(b != NULL);
+    JsonMut* root = json_builder_root_obj(b);
+    CHECK(root != NULL);
+    CHECK(json_builder_obj_add_str(b, root, "model", "gpt-test") == AGENT_OK);
+    JsonMut* nested = json_builder_obj_add_obj(b, root, "settings");
+    CHECK(nested != NULL);
+    CHECK(json_builder_obj_add_bool(b, nested, "stream", true) == AGENT_OK);
+
+    String out = string_new();
+    CHECK(json_builder_stringify_pretty(b, &out) == AGENT_OK);
+    CHECK(strchr(out.data, '\n') != NULL);
+    CHECK(strstr(out.data, "\"settings\"") != NULL);
+
+    JsonDoc* doc = json_parse(out.data, out.len);
+    CHECK(doc != NULL);
+    CHECK(json_val_is_obj(json_root(doc)));
+    CHECK(strcmp(json_obj_get_str(json_root(doc), "model"), "gpt-test") == 0);
+
+    json_doc_free(doc);
+    string_free(&out);
+    json_builder_free(b);
+    return g_failures;
+}
+
 static int test_builder_reset_and_nested_arrays(void) {
     JsonBuilder* b = json_builder_new();
     CHECK(b != NULL);
@@ -180,6 +206,7 @@ int main(void) {
     g_failures += test_parse_access();
     g_failures += test_parse_invalid();
     g_failures += test_builder_roundtrip();
+    g_failures += test_builder_pretty_stringify();
     g_failures += test_builder_reset_and_nested_arrays();
 
     if (g_failures == 0) {

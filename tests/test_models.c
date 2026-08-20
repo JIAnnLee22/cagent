@@ -97,6 +97,16 @@ static int test_config_models_parsing(void) {
     unlink(legacy_path);
 
     CHECK(config_save_model(path, "opencode-go/deepseek-v4-pro") == AGENT_OK);
+    FILE* saved_file = fopen(path, "rb");
+    CHECK(saved_file != NULL);
+    if (saved_file != NULL) {
+        char saved_json[4096] = {0};
+        size_t saved_len = fread(saved_json, 1, sizeof(saved_json) - 1, saved_file);
+        fclose(saved_file);
+        saved_json[saved_len] = '\0';
+        CHECK(strchr(saved_json, '\n') != NULL);
+        CHECK(strstr(saved_json, "  \"model\"") != NULL);
+    }
     Config saved = config_default();
     CHECK(config_load_file(&saved, path) == AGENT_OK);
     CHECK(saved.model_name != NULL && strcmp(saved.model_name, "opencode-go/deepseek-v4-pro") == 0);

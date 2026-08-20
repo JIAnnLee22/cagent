@@ -294,7 +294,28 @@ static Config* config_deep_copy(const Config* src) {
     c->protocol = src->protocol != NULL ? strdup(src->protocol) : NULL;
     c->models_path = src->models_path != NULL ? strdup(src->models_path) : NULL;
     c->model_name = src->model_name != NULL ? strdup(src->model_name) : NULL;
+    c->thinking_level = src->thinking_level != NULL ? strdup(src->thinking_level) : NULL;
     c->cwd = src->cwd != NULL ? strdup(src->cwd) : NULL;
+    c->custom_providers = NULL;
+    c->n_custom_providers = 0;
+    if (src->n_custom_providers > 0) {
+        c->custom_providers = calloc(src->n_custom_providers, sizeof(*c->custom_providers));
+        if (c->custom_providers == NULL) {
+            config_free(c);
+            return NULL;
+        }
+        for (size_t i = 0; i < src->n_custom_providers; i++) {
+            c->custom_providers[i].name = strdup(src->custom_providers[i].name);
+            c->custom_providers[i].base_url = strdup(src->custom_providers[i].base_url);
+            c->custom_providers[i].protocol = strdup(src->custom_providers[i].protocol);
+            if (c->custom_providers[i].name == NULL || c->custom_providers[i].base_url == NULL ||
+                c->custom_providers[i].protocol == NULL) {
+                config_free(c);
+                return NULL;
+            }
+        }
+        c->n_custom_providers = src->n_custom_providers;
+    }
     c->models = NULL;
     c->n_models = 0;
     if (src->n_models > 0) {
@@ -314,6 +335,9 @@ static Config* config_deep_copy(const Config* src) {
             dst->auth = s->auth != NULL ? strdup(s->auth) : NULL;
             dst->protocol = s->protocol != NULL ? strdup(s->protocol) : NULL;
             dst->models_path = s->models_path != NULL ? strdup(s->models_path) : NULL;
+            dst->input_price = s->input_price;
+            dst->output_price = s->output_price;
+            dst->subscription = s->subscription;
             dst->context_window = s->context_window;
             dst->max_output = s->max_output;
             if (dst->name == NULL || (s->label != NULL && dst->label == NULL) ||
@@ -747,7 +771,8 @@ static void app_apply_model(App* app, Model* mdl) {
     free(app->rt->config.model_name);
     app->rt->config.model_name = active_name != NULL ? strdup(active_name) : NULL;
     int save_rc = app->rt->config.model_name != NULL && provider != NULL
-                      ? config_save_selection(app->config_path, provider, active_name)
+                      ? config_save_selection_with_thinking(app->config_path, provider, active_name,
+                                                            app->rt->config.thinking_level)
                       : AGENT_ERR_OOM;
     /* The persisted provider is kept separately for routing, while the
      * active/API model name is always the bare provider model id. */
@@ -1414,6 +1439,14 @@ int main(int argc, char** argv) {
         if (err != AGENT_OK) {
             log_warn("ignoring bad config file %s", fpath);
         }
+    }
+    int custom_provider_rc = config_load_custom_providers(&cfg);
+    if (custom_provider_rc != AGENT_OK) {
+        log_warn("ignoring custom_provider.json (%s)", error_name(custom_provider_rc));
+    }
+    int models_file_rc = config_load_models_file(&cfg);
+    if (models_file_rc != AGENT_OK) {
+        log_warn("ignoring models.json (%s)", error_name(models_file_rc));
     }
     if (model_name != NULL) {
         free(cfg.model_name);

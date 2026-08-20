@@ -20,3 +20,9 @@ config.json
 
 # Runtime state (plans, sessions)
 .cagent/
+
+# Clangd index cache
+.cache/
+
+# Local provider metadata
+custom_provider.json

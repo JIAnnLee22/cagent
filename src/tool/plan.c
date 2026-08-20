@@ -150,7 +150,7 @@ static int plan_save(const char* path, const PlanList* plan) {
         }
     }
     String data = string_new();
-    int rc = json_builder_stringify(builder, &data);
+    int rc = json_builder_stringify_pretty(builder, &data);
     json_builder_free(builder);
     if (rc != AGENT_OK) { string_free(&data); return rc; }
 

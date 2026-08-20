@@ -720,11 +720,32 @@ typedef struct {
 
 static int copy_auth_member(const char* key, const JsonVal* value, void* userdata) {
     AuthCopyContext* ctx = userdata;
-    if (ctx != NULL && ctx->skip_key != NULL && strcmp(key, ctx->skip_key) == 0) {
+    if (ctx == NULL || key == NULL || value == NULL || !json_val_is_obj(value)) {
         return AGENT_OK;
     }
-    return ctx != NULL ? json_builder_obj_add_val_copy(ctx->builder, ctx->root, key, value)
-                       : AGENT_ERR_JSON;
+    if (ctx->skip_key != NULL && strcmp(key, ctx->skip_key) == 0) {
+        return AGENT_OK;
+    }
+    const char* type = json_obj_get_str(value, "type");
+    if (type != NULL && strcmp(type, "api_key") == 0) {
+        const char* api_key = json_obj_get_str(value, "key");
+        if (api_key == NULL) {
+            api_key = json_obj_get_str(value, "api_key");
+        }
+        if (api_key == NULL || api_key[0] == '\0') {
+            return AGENT_OK;
+        }
+        JsonMut* entry = json_builder_obj_add_obj(ctx->builder, ctx->root, key);
+        return entry == NULL ||
+                       json_builder_obj_add_str(ctx->builder, entry, "type", "api_key") != AGENT_OK ||
+                       json_builder_obj_add_str(ctx->builder, entry, "key", api_key) != AGENT_OK
+                   ? AGENT_ERR_OOM
+                   : AGENT_OK;
+    }
+    if (type != NULL && strcmp(type, "oauth") == 0) {
+        return json_builder_obj_add_val_copy(ctx->builder, ctx->root, key, value);
+    }
+    return AGENT_OK;
 }
 
 static int write_auth_json(const char* path, const String* json) {
@@ -748,9 +769,19 @@ static int write_auth_json(const char* path, const String* json) {
         }
         written += (size_t)n;
     }
+    bool newline_written = false;
+    while (written == json->len) {
+        ssize_t n = write(fd, "\n", 1);
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        newline_written = n == 1;
+        break;
+    }
     int sync_rc = fsync(fd);
     int close_rc = close(fd);
-    if (written != json->len || sync_rc != 0 || close_rc != 0 || rename(tmp, path) != 0) {
+    if (written != json->len || !newline_written || sync_rc != 0 || close_rc != 0 ||
+        rename(tmp, path) != 0) {
         unlink(tmp);
         return oauth_fail("cannot atomically save auth file");
     }
@@ -800,7 +831,7 @@ static int save_token(const char* path, const char* provider_name, const OAuthTo
               json_builder_obj_add_int(builder, entry, "expires", expires_ms) != AGENT_OK ||
               json_builder_obj_add_str(builder, entry, "accountId", token->account_id) != AGENT_OK)
                  ? AGENT_ERR_OOM
-                 : json_builder_stringify(builder, &json);
+                 : json_builder_stringify_pretty(builder, &json);
     json_builder_free(builder);
     json_doc_free(old_doc);
     string_free(&existing);
@@ -847,7 +878,7 @@ int auth_save_api_key(const char* path, const char* provider, const char* key) {
               json_builder_obj_add_str(builder, entry, "type", "api_key") != AGENT_OK ||
               json_builder_obj_add_str(builder, entry, "key", key) != AGENT_OK)
                  ? AGENT_ERR_OOM
-                 : json_builder_stringify(builder, &json);
+                 : json_builder_stringify_pretty(builder, &json);
     json_builder_free(builder);
     json_doc_free(old_doc);
     string_free(&existing);
@@ -1002,7 +1033,7 @@ int oauth_remove_provider(const char* path, const char* provider) {
         return AGENT_ERR_OOM;
     }
     String output = string_new();
-    rc = json_builder_stringify(builder, &output);
+    rc = json_builder_stringify_pretty(builder, &output);
     json_builder_free(builder);
     json_doc_free(doc);
     string_free(&data);

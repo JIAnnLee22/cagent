@@ -16,7 +16,9 @@
  *     json_doc_free(). data may be freed right after parsing.
  *   - All JsonVal accessors return borrowed pointers.
  *   - JsonBuilder owns its document; json_builder_stringify() appends the
- *     compact JSON text to *out (caller-owned String); json_builder_free()
+ *     compact JSON text to *out (caller-owned String), while
+ *     json_builder_stringify_pretty() uses human-friendly indentation;
+ *     json_builder_free()
  *     releases everything. json_builder_reset() clears the document for
  *     reuse (previously returned JsonMut pointers become invalid).
  *   - json_builder_*_add_str() copies the string into the document.
@@ -113,8 +115,11 @@ int json_builder_arr_add_str(JsonBuilder* b, JsonMut* arr, const char* value);
 int json_builder_arr_add_int(JsonBuilder* b, JsonMut* arr, int64_t value);
 int json_builder_arr_add_bool(JsonBuilder* b, JsonMut* arr, bool value);
 
-/* Append the compact JSON text to out. */
+/* Append compact JSON text to out. Suitable for JSONL and request bodies. */
 int json_builder_stringify(JsonBuilder* b, String* out);
+
+/* Append indented JSON text to out. Suitable for standalone saved JSON files. */
+int json_builder_stringify_pretty(JsonBuilder* b, String* out);
 
 /* Clear the document; previously returned JsonMut pointers are invalid. */
 void json_builder_reset(JsonBuilder* b);

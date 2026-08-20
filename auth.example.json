@@ -11,6 +11,10 @@
     "type": "api_key",
     "key": "YOUR_ANTHROPIC_API_KEY"
   },
+  "my-gateway": {
+    "type": "api_key",
+    "key": "YOUR_CUSTOM_PROVIDER_API_KEY"
+  },
   "openai-codex": {
     "type": "oauth",
     "access": "",
